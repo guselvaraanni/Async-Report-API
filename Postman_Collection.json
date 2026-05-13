@@ -1,0 +1,86 @@
+{
+  "info": {
+    "name": "Async Report Export API",
+    "description": "Complete API collection for testing the async report export system",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:5000/api/reports",
+      "type": "string"
+    },
+    {
+      "key": "task_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/health"
+      }
+    },
+    {
+      "name": "Test Celery",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/test-celery"
+      }
+    },
+    {
+      "name": "Generate Report",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"user_id\": 1, \"rows\": 50000}"
+        },
+        "url": "{{base_url}}/generate"
+      }
+    },
+    {
+      "name": "Check Status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/status/{{task_id}}"
+      }
+    },
+    {
+      "name": "Download Report",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/download/{{task_id}}"
+      }
+    },
+    {
+      "name": "List Reports",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/list?user_id=1"
+      }
+    },
+    {
+      "name": "Delete Report",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": "{{base_url}}/delete/{{task_id}}"
+      }
+    }
+  ]
+}
