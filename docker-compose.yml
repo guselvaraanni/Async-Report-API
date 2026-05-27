@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  db:
+    image: mysql:8.0
+    container_name: async-reports-db
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: async_reports
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Redis Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: async-reports-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 10s
+      retries: 5
+
+  # Flask Web Server
+  web:
+    build: .
+    container_name: async-reports-web
+    command: python run.py
+    environment:
+      FLASK_APP: run.py
+      FLASK_ENV: development
+      DATABASE_URL: mysql+pymysql://appuser:apppass@db:3306/async_reports
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+      - /tmp/reports:/tmp/reports
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Celery Worker
+  worker:
+    build: .
+    container_name: async-reports-worker
+    command: celery -A worker.celery worker --loglevel=info --concurrency=4
+    environment:
+      FLASK_APP: run.py
+      FLASK_ENV: development
+      DATABASE_URL: mysql+pymysql://appuser:apppass@db:3306/async_reports
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - .:/app
+      - /tmp/reports:/tmp/reports
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  default:
+    name: async-reports-network
