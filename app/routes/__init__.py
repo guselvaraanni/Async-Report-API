@@ -1,3 +1,3 @@
-from app.routes.reports import reports_bp
+from app.routes.legacy_reports import legacy_reports_bp
 
-__all__ = ['reports_bp']
+__all__ = ["legacy_reports_bp"]
