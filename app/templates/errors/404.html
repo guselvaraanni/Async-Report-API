@@ -1,0 +1,10 @@
+{% extends "layouts/base.html" %}
+{% set page_title = 'Not found' %}
+
+{% block content %}
+<div class="error-page">
+  <h1>404</h1>
+  <p class="muted">This route does not exist.</p>
+  <a href="{{ url_for('web.dashboard') }}" class="btn btn-primary" style="margin-top:16px">Overview</a>
+</div>
+{% endblock %}

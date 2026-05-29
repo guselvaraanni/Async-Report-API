@@ -1,0 +1,39 @@
+{% extends "layouts/base.html" %}
+{% set page_subtitle = "All export jobs — filter, retry, cancel, download" %}
+
+{% block page_actions %}
+<a href="{{ url_for('web.create_report') }}" class="btn btn-primary">Enqueue</a>
+{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+  <input type="search" class="input" id="search-q" placeholder="Filter by job ID…">
+  <select class="input input-select" id="filter-status">
+    <option value="">Any status</option>
+    <option value="QUEUED">QUEUED</option>
+    <option value="PROCESSING">PROCESSING</option>
+    <option value="COMPLETED">COMPLETED</option>
+    <option value="FAILED">FAILED</option>
+    <option value="CANCELED">CANCELED</option>
+  </select>
+  <select class="input input-select" id="sort-by">
+    <option value="created_at">Sort: created</option>
+    <option value="completed_at">Sort: completed</option>
+    <option value="started_at">Sort: started</option>
+  </select>
+</div>
+
+<div id="history-table-wrap" class="panel flush">
+  <div class="loading-state"><div class="spinner"></div><p>Loading jobs…</p></div>
+</div>
+
+<div class="pagination" id="pagination" hidden>
+  <button type="button" class="btn btn-ghost btn-sm" id="prev-page">Prev</button>
+  <span class="page-info mono" id="page-info"></span>
+  <button type="button" class="btn btn-ghost btn-sm" id="next-page">Next</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('web.static', filename='js/reports-history.js') }}"></script>
+{% endblock %}

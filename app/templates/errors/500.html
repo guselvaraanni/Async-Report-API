@@ -1,0 +1,10 @@
+{% extends "layouts/base.html" %}
+{% set page_title = 'Error' %}
+
+{% block content %}
+<div class="error-page">
+  <h1>500</h1>
+  <p class="muted">Something failed on the server. Check Flask logs.</p>
+  <a href="{{ url_for('web.dashboard') }}" class="btn btn-primary" style="margin-top:16px">Overview</a>
+</div>
+{% endblock %}

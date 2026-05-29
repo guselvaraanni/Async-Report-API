@@ -1,0 +1,11 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div id="detail-root" data-report-id="{{ report_id }}">
+  <div class="loading-state"><div class="spinner"></div><p>Loading report {{ report_id[:8] }}…</p></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('web.static', filename='js/report-detail.js') }}"></script>
+{% endblock %}

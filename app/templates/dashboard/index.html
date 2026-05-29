@@ -1,0 +1,43 @@
+{% extends "layouts/base.html" %}
+{% set page_subtitle = "Live job pipeline and worker health" %}
+
+{% block page_actions %}
+<a href="{{ url_for('web.create_report') }}" class="btn btn-primary">Enqueue export</a>
+{% endblock %}
+
+{% block content %}
+<section class="metric-row" id="stat-cards">
+  <div class="metric"><span class="metric-label">Total jobs</span><span class="metric-value mono" id="stat-total">—</span></div>
+  <div class="metric"><span class="metric-label">In flight</span><span class="metric-value mono" id="stat-queue">—</span></div>
+  <div class="metric"><span class="metric-label">Completed</span><span class="metric-value mono" id="stat-completed">—</span></div>
+  <div class="metric"><span class="metric-label">Failed</span><span class="metric-value mono" id="stat-failed">—</span></div>
+</section>
+
+<section class="split-panels">
+  <div class="panel">
+    <div class="panel-head">
+      <h2 class="panel-title">Workers</h2>
+      <span id="celery-status-badge"></span>
+    </div>
+    <div id="ops-summary" class="panel-body"><div class="spinner"></div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2 class="panel-title">Status mix</h2></div>
+    <div id="status-chart" class="panel-body"></div>
+  </div>
+</section>
+
+<section class="panel" style="margin-top:20px">
+  <div class="panel-head">
+    <h2 class="panel-title">Recent jobs</h2>
+    <a href="{{ url_for('web.report_history') }}" class="btn btn-ghost btn-sm">All jobs →</a>
+  </div>
+  <div id="recent-activity" class="panel-body flush">
+    <div class="loading-state"><div class="spinner"></div><p>Loading…</p></div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('web.static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

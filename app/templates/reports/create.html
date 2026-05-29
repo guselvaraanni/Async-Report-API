@@ -1,0 +1,38 @@
+{% extends "layouts/base.html" %}
+{% set page_subtitle = "Submit a row-limited CSV export to the reports queue" %}
+
+{% block content %}
+<div class="split-panels">
+  <div class="panel">
+    <div class="panel-head"><h2 class="panel-title">New job</h2></div>
+    <form id="create-form" class="panel-body form-stack">
+      <label class="field">
+        <span>User ID</span>
+        <input class="input mono" type="number" name="user_id" value="1" min="1" required>
+      </label>
+      <label class="field">
+        <span>Rows to export</span>
+        <input class="input mono" type="number" name="rows" value="50" min="1" max="1000000" required>
+        <small class="field-hint">
+          Exports up to this many rows from MySQL. User 1 has ~50 transactions;
+          for 50k rows use <strong>user_id 2</strong> after <code>python seed_50k.py</code>.
+        </small>
+      </label>
+      <button type="submit" class="btn btn-primary" id="submit-btn">Enqueue job</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2 class="panel-title">Live tracker</h2></div>
+    <div id="job-tracker" class="panel-body">
+      <div class="empty-state compact">
+        <p>Submit a job to watch QUEUED → PROCESSING → COMPLETED.</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('web.static', filename='js/reports-create.js') }}"></script>
+{% endblock %}

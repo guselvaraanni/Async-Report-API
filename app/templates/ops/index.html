@@ -1,0 +1,43 @@
+{% extends "layouts/base.html" %}
+{% set page_subtitle = "Celery workers, queue depth, failed tasks" %}
+
+{% block content %}
+<section class="metric-row" id="ops-stats">
+  <div class="metric"><span class="metric-label">Workers</span><span class="metric-value mono" id="ops-workers">—</span></div>
+  <div class="metric"><span class="metric-label">Active</span><span class="metric-value mono" id="ops-active">—</span></div>
+  <div class="metric"><span class="metric-label">Reserved</span><span class="metric-value mono" id="ops-reserved">—</span></div>
+  <div class="metric"><span class="metric-label">Depth (est.)</span><span class="metric-value mono" id="ops-depth">—</span></div>
+</section>
+
+<section class="split-panels">
+  <div class="panel">
+    <div class="panel-head"><h2 class="panel-title">Worker nodes</h2></div>
+    <ul class="worker-list" id="worker-list"><li class="muted">Loading…</li></ul>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2 class="panel-title">Queues</h2></div>
+    <pre class="code-block" id="queue-info">Loading…</pre>
+  </div>
+</section>
+
+<section class="panel" style="margin-top:20px">
+  <div class="panel-head">
+    <h2 class="panel-title">Failed jobs</h2>
+    <button type="button" class="btn btn-ghost btn-sm" id="refresh-failed">Refresh</button>
+  </div>
+  <div id="failed-jobs" class="panel-body flush"><div class="spinner"></div></div>
+</section>
+
+<section class="panel" style="margin-top:20px">
+  <div class="panel-head"><h2 class="panel-title">Maintenance</h2></div>
+  <div class="panel-body">
+    <p class="muted">Preview deletion of terminal jobs older than 7 days.</p>
+    <button type="button" class="btn btn-ghost btn-sm" id="cleanup-dry">Dry-run cleanup</button>
+    <pre class="code-block" id="cleanup-result" hidden></pre>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('web.static', filename='js/ops.js') }}"></script>
+{% endblock %}

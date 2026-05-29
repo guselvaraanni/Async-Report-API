@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page_title or 'Overview' }} · Export Queue</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('web.static', filename='css/app.css') }}">
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+  <div id="connectivity-banner" class="connectivity-banner" aria-hidden="true" role="status"></div>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a href="{{ url_for('web.dashboard') }}" class="brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-text">Export Queue</span>
+      </a>
+
+      <nav class="site-nav" aria-label="Main">
+        <a href="{{ url_for('web.dashboard') }}" class="nav-link {% if active_page == 'dashboard' %}active{% endif %}">Overview</a>
+        <a href="{{ url_for('web.report_history') }}" class="nav-link {% if active_page == 'history' %}active{% endif %}">Jobs</a>
+        <a href="{{ url_for('web.create_report') }}" class="nav-link {% if active_page == 'create' %}active{% endif %}">Enqueue</a>
+        <a href="{{ url_for('web.download_center') }}" class="nav-link {% if active_page == 'downloads' %}active{% endif %}">Files</a>
+        <a href="{{ url_for('web.ops_dashboard') }}" class="nav-link {% if active_page == 'ops' %}active{% endif %}">Infra</a>
+      </nav>
+
+      <div class="header-status">
+        <span class="status-chip" title="Queued + processing jobs">
+          <span class="chip-label">queue</span>
+          <span class="chip-value mono" id="topbar-queue-count">—</span>
+        </span>
+        <span class="status-chip" title="Celery workers">
+          <span class="dot dot-muted" id="topbar-worker-dot"></span>
+          <span class="chip-value" id="topbar-worker-text">workers</span>
+        </span>
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Toggle theme">◐</button>
+      </div>
+
+      <button type="button" class="icon-btn mobile-nav-toggle" id="mobile-nav-toggle" aria-label="Menu">☰</button>
+    </div>
+  </header>
+
+  <main class="site-main">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">{{ page_title or 'Overview' }}</h1>
+        {% if page_subtitle %}
+        <p class="page-subtitle">{{ page_subtitle }}</p>
+        {% else %}
+        <p class="page-subtitle">Async CSV exports · Celery workers · Memurai broker</p>
+        {% endif %}
+      </div>
+      {% block page_actions %}{% endblock %}
+    </div>
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <span class="dot dot-muted" id="sidebar-worker-dot"></span>
+    Flask · Celery · Memurai (Redis)
+  </footer>
+
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <script src="{{ url_for('web.static', filename='js/api.js') }}"></script>
+  <script src="{{ url_for('web.static', filename='js/ui.js') }}"></script>
+  <script src="{{ url_for('web.static', filename='js/polling.js') }}"></script>
+  <script src="{{ url_for('web.static', filename='js/app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
