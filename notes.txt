@@ -1,0 +1,488 @@
+================================================================
+ASYNC REPORT GENERATION API - INTERNAL ENGINEERING NOTES
+================================================================
+Companion to PROJECT_ANALYSIS.md.
+UI screenshots for recruiters: README.md § Screenshots (screenshots/ folder).
+This file captures the "how it really works under the hood" detail
+that you should re-read before any refactor or UI work.
+
+----------------------------------------------------------------
+0. THE ONE THING TO REMEMBER
+----------------------------------------------------------------
+Celery is now the ONLY background execution path.
+
+Canonical APIs live under:
+  /api/v1/reports/*
+
+Backward compatibility shim (for older scripts/UI) remains under:
+  /reports/*
+
+Key files:
+  - app/api/v1/reports.py         canonical report lifecycle APIs
+  - app/api/v1/ops.py             worker/queue monitoring APIs
+  - app/celery_app.py             Celery single source of truth + Flask context task wrapper
+  - app/tasks/export_tasks.py     Celery task (chunked export + cooperative cancel + retries)
+  - app/routes/legacy_reports.py  /reports/* compatibility shim
+  - worker.py                     Celery worker entrypoint
+
+----------------------------------------------------------------
+1. REQUEST FLOW (TRACED FROM CODE)
+----------------------------------------------------------------
+Client -> POST /api/v1/reports/ { user_id, rows }
+  app/api/v1/reports.py :: create_report_job()
+    - validates rows (int, >0, <= MAX_ROWS_PER_REPORT)
+    - validates user exists
+    - report_id = UUID4 (also used as Celery task_id)
+    - Report(user_id, task_id=report_id, status='QUEUED', requested_rows=rows) -> commit
+    - export_transactions_task.apply_async(..., task_id=report_id, queue='reports')
+    - return 202 { report_id, task_id, status, created_at }
+
+Worker -> Celery consumes from Redis queue 'reports'
+  app/tasks/export_tasks.py :: export_transactions_task(report_id, user_id, requested_rows)
+    - report.status = PROCESSING; started_at = utcnow; commit
+    - file_path = REPORTS_FOLDER/report_<id>.csv; persist report.file_path
+    - stream rows in bounded memory:
+        Transaction.query.filter_by(user_id=...).order_by(id).limit(n).yield_per(batch)
+    - write CSV line-by-line
+    - periodically commit progress (rows_processed + progress_pct)
+    - cooperative cancellation:
+        if report.status == CANCEL_REQUESTED -> mark CANCELED and stop early
+    - on success -> COMPLETED + completed_at + progress_pct=100
+    - on error -> FAILED + error_message + completed_at
+
+Client -> GET /api/v1/reports/<id>/status
+  - returns report lifecycle fields + links
+  - includes best-effort celery state enrichment
+
+Client -> GET /api/v1/reports/<id>/download
+  - allowed only when status == COMPLETED
+  - send_file(report.file_path)
+
+Legacy compatibility:
+  - POST /reports/generate -> forwards to POST /api/v1/reports/
+  - GET  /reports/status/<id> -> forwards to /api/v1/reports/<id>/status
+  - GET  /reports/download/<id> -> forwards to /api/v1/reports/<id>/download
+
+----------------------------------------------------------------
+2. ASYNC LIFECYCLE
+----------------------------------------------------------------
+State machine (DB column reports.status):
+
+  QUEUED ---> PROCESSING ---> COMPLETED
+                          \--> FAILED
+                          \--> CANCEL_REQUESTED ---> CANCELED
+
+Important: CANCEL_REQUESTED is the client-facing intent; CANCELED is the terminal state.
+
+Timestamps captured:
+  created_at    -> set by SQLAlchemy default at row insert
+  started_at    -> set when the thread enters PROCESSING
+  completed_at  -> set when status becomes COMPLETED (also written
+                   on FAILED in practice? No - only on COMPLETED)
+
+CANCELED gotcha:
+  - /reports/cancel/<task_id> only sets status='CANCELED' in DB.
+  - The running thread has NO check for "did the user cancel?"
+  - The thread will happily finish and overwrite status to COMPLETED.
+  - This is a race-condition / lie-to-user bug.
+
+----------------------------------------------------------------
+3. DATABASE FLOW
+----------------------------------------------------------------
+Engine config:
+  - URI: mysql+pymysql://root:selva@localhost:3306/heavy_data_db
+    (config.py default; .env overrides to mysql+mysqlconnector
+     which is NOT installed -> latent bug)
+  - SQLALCHEMY_TRACK_MODIFICATIONS = False (good)
+  - No pool tuning. Defaults: pool_size=5, no pool_pre_ping.
+
+Tables (created via db.create_all(); no Alembic):
+  users
+    id PK, username UNIQUE, email UNIQUE, created_at
+  transactions
+    id PK, user_id FK->users.id, amount FLOAT, currency, status, created_at
+  reports
+    id PK, user_id FK->users.id,
+    task_id String(255) UNIQUE,
+    status String(50) default 'PENDING',
+    file_url String(500) nullable,
+    error_message TEXT nullable,
+    rows_processed INT default 0,
+    created_at, started_at nullable, completed_at nullable
+
+Relations:
+  User.reports = relationship('Report', backref='user',
+                              cascade='all, delete-orphan')
+  - Deleting a user cascades to their reports.
+  - BUT: the CSV files on disk are NOT deleted. Orphaned files.
+
+Indexes needed (not present):
+  - reports.user_id   (used by /list, /stats group bys)
+  - reports.status    (used by /stats counts)
+  - reports.created_at
+  - transactions.user_id  (used by every export query)
+
+Migration story:
+  - There IS NO migration tool. Adding/changing columns will not
+    propagate to an existing database. Use Alembic before any
+    schema change.
+
+----------------------------------------------------------------
+4. REPORT GENERATION LIFECYCLE
+----------------------------------------------------------------
+1) POST /generate -> 202 + task_id (instant)
+2) Thread spawned -> updates Report to PROCESSING
+3) Thread executes the SELECT (this is the slowest step today
+   because of .all())
+4) Thread iterates rows, writes CSV line by line
+5) Every 1000 rows -> DB commit to update rows_processed
+6) On finish -> Report COMPLETED + file_url stored
+7) Client polls /status until COMPLETED
+8) Client hits /download -> file streamed via send_file
+
+Important: the *requested* row count is NEVER persisted on the
+Report row. Only rows_processed exists. The UI cannot compute
+"percent complete" without storing the target.
+
+----------------------------------------------------------------
+5. KEY FILES TO STUDY (IN READING ORDER)
+----------------------------------------------------------------
+1) run.py                         entrypoint, loads .env
+2) app/__init__.py                Flask factory, Celery+swagger init,
+                                   db.create_all()
+3) app/config.py                  Config class, DB URI, Celery URIs,
+                                   timeouts, reports folder
+4) app/extensions.py              SQLAlchemy() singleton
+5) app/models/{user,report,transaction}.py
+6) app/routes/reports.py          THE ACTIVE ROUTES (threading flow)
+7) app/tasks/export_tasks.py      THE ACTIVE TASK (plain function)
+8) worker.py                      BROKEN Celery entrypoint
+9) app/routes/r.py                DEAD Celery route file
+10) docker-compose.yml, Dockerfile (aspirational deploy)
+11) seeds_db.py, seed_50k.py      Sample data generators
+
+----------------------------------------------------------------
+6. KEY BACKEND CONCEPTS USED (HONEST LIST)
+----------------------------------------------------------------
+Actually demonstrated:
+- Flask application factory pattern (create_app)
+- Flask Blueprints (reports_bp)
+- SQLAlchemy ORM with relationships and cascade delete
+- Per-thread Flask app context (app.app_context())
+- Per-thread SQLAlchemy session isolation
+- HTTP 202 Accepted for async submission
+- UUID4-based external IDs
+- State-machine-style status column
+- Polling-based progress
+- send_file for streamed binary download
+- Swagger/OpenAPI via flasgger
+- Dockerfile + docker-compose (services definition)
+
+Claimed but NOT actually demonstrated:
+- Celery + Redis (configured, never reached)
+- 10K-row batched DB reads (README claim, code uses .all())
+- Tuned connection pool (defaults only)
+- Production-grade cancellation (just a DB flag)
+- Retries / DLQ / backoff
+- Auth, rate limiting, monitoring
+
+----------------------------------------------------------------
+7. DEBUGGING / OBSERVABILITY NOTES
+----------------------------------------------------------------
+There is no logger. The codebase uses print(). When something
+breaks, look at:
+  - The terminal running `python run.py` (request prints + thread prints)
+  - MySQL: SELECT * FROM reports WHERE task_id='...'
+  - The file: ls /tmp/reports/ (or C:\tmp\reports\ on Windows where
+    /tmp gets created at the current drive root by os.makedirs)
+
+Common failure modes:
+  - "ModuleNotFoundError: mysql.connector" -> .env uses
+    mysql+mysqlconnector but only PyMySQL is installed.
+    Fix: change DATABASE_URL in .env to mysql+pymysql.
+  - "Report not found" right after generate -> session timing;
+    the thread queries before the parent commit propagated.
+    Mitigation: parent commits BEFORE thread.start(), already done.
+  - Thread silently dies -> the broad except in export_tasks.py
+    catches and writes FAILED, but if the failure happens before
+    the first commit, error_message may stay null.
+  - File path on Windows -> os.makedirs('/tmp/reports/') creates
+    "C:\tmp\reports" (or the current drive). It works but it's
+    not portable. Use config.REPORTS_FOLDER + os.path.join.
+
+Useful manual probes:
+  - curl http://localhost:5000/reports/health
+  - curl -X POST http://localhost:5000/reports/generate \
+         -H "Content-Type: application/json" \
+         -d "{\"user_id\":1,\"rows\":1000}"
+  - curl http://localhost:5000/reports/status/<task_id>
+  - curl -OJ http://localhost:5000/reports/download/<task_id>
+  - curl http://localhost:5000/reports/stats
+  - Swagger UI: http://localhost:5000/apidocs
+
+NB: do NOT use /api/reports/... ; the actual prefix is /reports/.
+
+----------------------------------------------------------------
+8. KNOWN LIMITATIONS (snapshot of today's state)
+----------------------------------------------------------------
+- Threading model is process-bound. Restart loses jobs.
+- No upper bound on concurrent threads.
+- Cancel does not actually stop a running task.
+- Cancel can be overwritten by COMPLETED.
+- No auth; any task_id can be downloaded/deleted by anyone.
+- /list has no pagination -> will return thousands of rows.
+- /generate has no rate limit -> trivial DoS.
+- /tmp/reports/ has no cleanup -> disk fills up.
+- 30-min Celery time limit does NOT apply (Celery isn't running).
+- Test scripts are not pytest; no CI; no test isolation.
+- requested_rows isn't stored on Report -> UI cannot show real %.
+- error_message returns str(e) to clients -> info leak.
+- print() everywhere -> no log levels, no rotation.
+- db.create_all() instead of Alembic -> schema evolution will break.
+- Postman/Nginx/Quickstart use /api/reports/* -> docs do not match code.
+- worker.py import of dummy_task is broken -> Celery worker won't boot.
+- app/routes/r.py is orphaned code -> delete or merge.
+- .env uses mysql+mysqlconnector but only pymysql is installed.
+
+----------------------------------------------------------------
+9. FUTURE IMPROVEMENTS (ROADMAP)
+----------------------------------------------------------------
+P0 - Truth / correctness
+  - Promote Celery to the live path; remove threading from routes.
+  - Delete app/routes/r.py.
+  - Fix worker.py (remove or implement dummy_task).
+  - Align URL prefix: pick /reports OR /api/reports and fix
+    both code and docs.
+  - Fix .env driver to mysql+pymysql.
+
+P1 - Honesty in performance
+  - yield_per(10_000) instead of .all().
+  - Store requested_rows on Report (so UI can show %).
+  - Cooperative cancellation: in-loop status check every N rows.
+  - On worker boot, mark stale PROCESSING rows as FAILED.
+
+P2 - Hardening
+  - JWT auth + per-user authorization on download/delete/cancel.
+  - Flask-Limiter rate limit on /generate.
+  - pydantic/marshmallow schemas + 400 on validation failure.
+  - logging.getLogger(__name__) with JSON formatter + request IDs.
+  - Gunicorn (or uWSGI) instead of app.run(debug=True).
+  - Alembic / Flask-Migrate for migrations.
+  - DB indexes: reports.user_id, reports.status, reports.created_at,
+    transactions.user_id.
+  - Tuned pool: pool_size, max_overflow, pool_pre_ping, pool_recycle.
+  - Pagination + filters on /list.
+  - Cleanup job (Celery beat) deleting CSVs older than N days.
+
+P3 - Senior signal
+  - Idempotency keys on /generate.
+  - Celery autoretry_for + retry_backoff for transient DB errors.
+  - Dead-letter queue (separate queue) for permanent failures.
+  - Storage abstraction (LocalDisk + S3 implementations).
+  - Pre-signed download URLs (S3 / Cloud Storage).
+  - Prometheus metrics: jobs_submitted, jobs_completed, jobs_failed,
+    job_duration_seconds histogram, queue_depth gauge.
+  - OpenTelemetry tracing: HTTP -> Celery task -> DB.
+  - Webhook or SSE/WebSocket for "task completed" (drop polling).
+  - Multi-format export (XLSX, JSON, Parquet).
+  - Date-range / column / filter parameters on /generate.
+
+----------------------------------------------------------------
+10. UI WORK PREREQUISITES (READ BEFORE BUILDING THE FRONTEND)
+----------------------------------------------------------------
+Before writing the frontend, expect/decide:
+
+a) Persist `requested_rows` on Report. Without it, the progress
+   bar cannot compute % - the UI will look broken on big jobs.
+b) Decide the URL prefix once (/reports vs /api/reports) and
+   never change it again.
+c) Add at least basic auth before exposing /download (otherwise
+   the UI is shipping an open data leak).
+d) Add pagination + status filter to /list; the history table
+   is unusable otherwise.
+e) Add a real cancel (so the Cancel button doesn't lie).
+f) Decide if the UI will poll (current model) or subscribe to
+   server-sent events (recommended).
+g) When you add multi-format export, the UI's "format" dropdown
+   needs values that match the API (csv | xlsx | json).
+h) Decide which screens are admin-only - those will need an
+   admin role on the backend (currently no role concept exists).
+
+UI screens to plan (no implementation yet, see PROJECT_ANALYSIS.md):
+  1. Login / Auth        (blocked until API auth exists)
+  2. Dashboard           (uses /api/v1/ops/* and /api/v1/reports/)
+  3. Generate Report     (form -> POST /api/v1/reports/)
+  4. Report Detail       (polls GET /api/v1/reports/<id>/status)
+  5. History Table       (paginated GET /api/v1/reports/?user_id=...)
+  6. Download Center     (status=COMPLETED filter)
+  7. Admin: Queue        (PENDING + PROCESSING)
+  8. Admin: Failed Jobs  (FAILED + retry)
+  9. Admin: System Health
+  10. Settings / Profile
+
+----------------------------------------------------------------
+12. STARTUP (WINDOWS + MEMURAI — NO DOCKER)
+----------------------------------------------------------------
+1. Ensure Memurai service is running (Redis-compatible on localhost:6379)
+2. Terminal 1 — Celery worker (Windows MUST use --pool=solo):
+     .\scripts\start_worker.ps1
+     OR: celery -A worker.celery worker --loglevel=info -Q reports --pool=solo --concurrency=1
+     OR: python worker.py
+     If you see "not enough values to unpack" in trace.py → you forgot --pool=solo
+3. Terminal 2 — Flask API + Dashboard UI:
+     python run.py
+4. Open http://localhost:5000/
+
+DB migrations (Flask-Migrate):
+  $env:FLASK_ENV='development'
+  flask --app run.py db upgrade
+
+  Legacy DB (pre-v1 schema with file_url, no requested_rows):
+  If upgrade fails because tables already exist, stamp then upgrade:
+    flask --app run.py db stamp a70986e2aa61
+    flask --app run.py db upgrade
+  Migration b8c4e1f2a903 adds requested_rows, progress_pct, cancel_requested_at,
+  renames file_url -> file_path, and backfills progress.
+
+----------------------------------------------------------------
+13. FRONTEND ARCHITECTURE
+----------------------------------------------------------------
+Stack: Flask Jinja2 templates + vanilla JS + custom CSS (no React/Bootstrap)
+
+UI routes (app/web/routes.py):
+  /                 Dashboard
+  /reports/new      Create export + live job tracker
+  /reports          History (pagination, filter, search)
+  /reports/<id>     Detail + polling lifecycle
+  /downloads        Download center
+  /ops              Queue & worker monitoring
+
+JS modules (app/static/js/):
+  api.js        ReportAPI — fetch wrapper; AbortSignal; offline error classification
+  ui.js         toasts, status badges, progress bars, offlineState helper
+  polling.js    PollingManager + Connectivity + JobPoller (centralized polling)
+  app.js        theme toggle, sidebar, topbar (PollingManager, 15s)
+  dashboard.js, reports-history.js, ops.js — PollingManager (12s), offline UI
+  reports-create.js, report-detail.js, downloads.js — JobPoller or one-shot fetch
+
+Polling lifecycle (polling.js):
+  - NO raw setInterval anywhere in page scripts
+  - PollingManager uses setTimeout chain + clearTimeout on stop/pause
+  - AbortController aborts in-flight fetch on stop, tab hide, or page unload
+  - Exponential backoff on failures (2x up to maxIntervalMs 120s)
+  - maxConsecutiveFailures (default 5) then pauseDueToFailure()
+  - Connectivity singleton coordinates global offline/reconnecting state
+  - First offline error → markOffline() → pause ALL pollers + show banner
+  - Reconnect probe: GET /api/v1/reports/health every 15s–120s (backoff)
+  - markOnline() → resumeFromConnectivity() on every registered poller
+  - visibilitychange: pause when hidden, resume when visible
+  - pagehide/beforeunload: PollerRegistry.stopAll()
+
+Reconnect architecture:
+  - User sees banner: "Backend offline" or "Reconnecting…"
+  - Topbar: "Backend offline" / "Reconnecting…" / worker count
+  - UI.offlineState() replaces infinite spinners on dashboard/history/ops
+  - "Check connection" button → Connectivity.retryConnection()
+  - No toast spam — single offline toast per outage
+
+Backend availability handling:
+  - fetch TypeError → err.offline=true (Flask stopped / connection refused)
+  - HTTP 500+ → err.offline=true (server error / DB schema mismatch)
+  - HTTP 503 on metrics → "Workers unavailable" when online but Celery down
+  - skipConnectivitySideEffects on health probe to avoid false-positive markOnline
+
+Interval management:
+  dashboard + history + ops: 12s
+  topbar: 15s
+  job detail/create: 1.5–2s (JobPoller)
+  reconnect probe: 15s initial, 1.5x backoff to 120s max
+
+Async UI flow:
+  Form submit -> POST /api/v1/reports/ -> 202 QUEUED
+  JobPoller starts -> GET /status every 2s (pauses when tab hidden or backend down)
+  Worker updates DB -> UI shows PROCESSING + progress_pct
+  Terminal state -> polling stops -> download enabled
+
+Debug tips:
+  - Red worker dot in topbar = Celery worker offline or Memurai down (backend still up)
+  - "Backend offline" banner = Flask not running or repeated 5xx
+  - Jobs stuck QUEUED = worker not consuming queue "reports"
+  - Stop Flask -> polling stops within 1 failure (all pollers pause immediately)
+  - Restart Flask -> reconnect probe resumes live updates automatically
+  - Browser DevTools Network tab -> should NOT flood after backend shutdown
+
+----------------------------------------------------------------
+14. TESTING
+----------------------------------------------------------------
+pytest -q   (14 tests: API lifecycle, legacy compat, UI pages, stats/metrics)
+
+Notes:
+  - pytest only collects tests under /tests (see pytest.ini)
+  - legacy scripts under app/tests are NOT collected by pytest
+
+----------------------------------------------------------------
+17. UI REDESIGN — EXPORT QUEUE
+----------------------------------------------------------------
+- Top navigation (no giant sidebar): Overview | Jobs | Enqueue | Files | Infra
+- CSS: app/static/css/app.css — dark-first, minimal, mono job IDs
+- Downloads: blob-based via ReportAPI.downloadReport() — see TESTING_GUIDE.md
+- Legacy COMPLETED jobs without CSV on disk show "Missing" in Files page
+
+----------------------------------------------------------------
+16. BEGINNER GUIDE (START HERE IF OVERWHELMED)
+----------------------------------------------------------------
+See PROJECT_ANALYSIS.md §12 for the full narrative. Quick version:
+
+THE FIVE PARTS:
+  Browser  -> dashboard you see
+  Flask    -> python run.py (API + HTML)
+  Memurai  -> Redis-compatible queue (localhost:6379)
+  Celery   -> celery worker (does the heavy CSV export)
+  MySQL    -> heavy_data_db (stores report status)
+
+WHY POLLING?
+  The worker runs in a separate process. The browser must ASK repeatedly:
+  "Are we done yet?" That is GET /status, /stats, /metrics every N seconds.
+  This is normal. It should NOT spam forever when Flask is stopped — see §13.
+
+WHY ASYNC?
+  Exporting 50k rows in one HTTP request would freeze/crash Flask.
+  Instead Flask enqueues work in ~50ms and the worker finishes in the background.
+
+STATUS MEANINGS:
+  QUEUED      waiting for worker
+  PROCESSING  worker writing CSV
+  COMPLETED   download ready
+  FAILED      see error_message; listed on /ops/failed
+  CANCELED    user stopped job
+
+METRICS vs STATS:
+  /api/v1/reports/stats  -> dashboard totals + recent table
+  /api/v1/ops/metrics    -> worker counts + status distribution
+
+DEBUGGING:
+  Backend offline banner     -> Flask not running
+  Workers unavailable        -> Celery/Memurai issue (Flask may still be up)
+  500 on stats               -> run: flask --app run.py db upgrade
+  500 on /ops/failed         -> fixed (missing current_app import)
+
+STARTUP (Windows):
+  celery -A worker.celery worker --loglevel=info -Q reports --concurrency=4
+  python run.py
+  http://localhost:5000/
+
+----------------------------------------------------------------
+15. MAINTENANCE
+----------------------------------------------------------------
+Keep this file in lockstep with:
+  - PROJECT_ANALYSIS.md
+  - app/api/v1/reports.py, app/api/v1/ops.py
+  - app/web/routes.py, app/static/js/*
+  - app/tasks/export_tasks.py
+  - app/models/report.py
+
+Whenever you change API or UI, update sections 1, 12, 13 here.
+
+================================================================
+END OF NOTES
+================================================================

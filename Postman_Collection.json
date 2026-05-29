@@ -7,7 +7,7 @@
   "variable": [
     {
       "key": "base_url",
-      "value": "http://localhost:5000/api/reports",
+      "value": "http://localhost:5000/api/v1/reports",
       "type": "string"
     },
     {
@@ -30,7 +30,7 @@
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{base_url}}/test-celery"
+        "url": "http://localhost:5000/api/v1/ops/health"
       }
     },
     {
@@ -47,7 +47,7 @@
           "mode": "raw",
           "raw": "{\"user_id\": 1, \"rows\": 50000}"
         },
-        "url": "{{base_url}}/generate"
+        "url": "{{base_url}}/"
       }
     },
     {
@@ -55,7 +55,7 @@
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{base_url}}/status/{{task_id}}"
+        "url": "{{base_url}}/{{task_id}}/status"
       }
     },
     {
@@ -63,7 +63,7 @@
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{base_url}}/download/{{task_id}}"
+        "url": "{{base_url}}/{{task_id}}/download"
       }
     },
     {
@@ -71,7 +71,7 @@
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{base_url}}/list?user_id=1"
+        "url": "{{base_url}}/?user_id=1"
       }
     },
     {
@@ -79,7 +79,7 @@
       "request": {
         "method": "DELETE",
         "header": [],
-        "url": "{{base_url}}/delete/{{task_id}}"
+        "url": "{{base_url}}/{{task_id}}"
       }
     }
   ]

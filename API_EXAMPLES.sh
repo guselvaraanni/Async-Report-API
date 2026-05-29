@@ -1,7 +1,7 @@
 #!/bin/bash
 # API_EXAMPLES.sh - Complete cURL examples for testing the async report API
 
-BASE_URL="http://localhost:5000/api/reports"
+BASE_URL="http://localhost:5000/api/v1/reports"
 
 echo "=== Async Report API - cURL Examples ==="
 echo ""
@@ -32,7 +32,7 @@ read -p "Press Enter to continue..."
 # ==========================================
 echo ""
 echo "3. Generate New Report (Async)"
-echo "   Endpoint: POST /api/reports/generate"
+echo "   Endpoint: POST /api/v1/reports/"
 echo "   Payload: {\"user_id\": 1, \"rows\": 50000}"
 echo "   Command:"
 echo "   curl -X POST $BASE_URL/generate \\"
@@ -41,7 +41,7 @@ echo "     -d '{\"user_id\": 1, \"rows\": 50000}'"
 echo ""
 echo "   Saving task_id to variable for next steps..."
 
-RESPONSE=$(curl -s -X POST $BASE_URL/generate \
+RESPONSE=$(curl -s -X POST $BASE_URL/ \
   -H "Content-Type: application/json" \
   -d '{"user_id": 1, "rows": 50000}')
 
@@ -62,7 +62,7 @@ echo ""
 # 4. CHECK REPORT STATUS (POLLING)
 # ==========================================
 echo "4. Check Report Status (Polling)"
-echo "   Endpoint: GET /api/reports/status/<task_id>"
+echo "   Endpoint: GET /api/v1/reports/<id>/status"
 echo "   Command:"
 echo "   curl $BASE_URL/status/$TASK_ID"
 echo ""
@@ -73,7 +73,7 @@ MAX_ITERATIONS=60  # 2 minutes max
 ITERATION=0
 
 while [ $ITERATION -lt $MAX_ITERATIONS ]; do
-  STATUS_RESPONSE=$(curl -s "$BASE_URL/status/$TASK_ID")
+STATUS_RESPONSE=$(curl -s "$BASE_URL/$TASK_ID/status")
   
   if command -v jq &> /dev/null; then
     STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
@@ -102,12 +102,12 @@ done
 # ==========================================
 if [ "$STATUS" = "COMPLETED" ]; then
   echo "5. Download Report (CSV File)"
-  echo "   Endpoint: GET /api/reports/download/<task_id>"
+echo "   Endpoint: GET /api/v1/reports/<id>/download"
   echo "   Command:"
   echo "   curl -O $BASE_URL/download/$TASK_ID"
   echo ""
   
-  curl -O "$BASE_URL/download/$TASK_ID"
+  curl -O "$BASE_URL/$TASK_ID/download"
   
   FILENAME="report_$TASK_ID.csv"
   if [ -f "$FILENAME" ]; then
@@ -128,12 +128,12 @@ fi
 # 6. LIST ALL REPORTS FOR USER
 # ==========================================
 echo "6. List All Reports for User"
-echo "   Endpoint: GET /api/reports/list?user_id=1"
+echo "   Endpoint: GET /api/v1/reports/?user_id=1"
 echo "   Command:"
 echo "   curl '$BASE_URL/list?user_id=1'"
 echo ""
 
-LIST_RESPONSE=$(curl -s "$BASE_URL/list?user_id=1")
+LIST_RESPONSE=$(curl -s "$BASE_URL/?user_id=1")
 echo "   Response:"
 echo "   $LIST_RESPONSE"
 echo ""
@@ -142,14 +142,14 @@ echo ""
 # 7. DELETE REPORT
 # ==========================================
 echo "7. Delete Report (Optional)"
-echo "   Endpoint: DELETE /api/reports/delete/<task_id>"
+echo "   Endpoint: DELETE /api/v1/reports/<id>"
 echo "   Command:"
 echo "   curl -X DELETE $BASE_URL/delete/$TASK_ID"
 echo ""
 read -p "Delete the report? (y/n): " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-  DELETE_RESPONSE=$(curl -s -X DELETE "$BASE_URL/delete/$TASK_ID")
+  DELETE_RESPONSE=$(curl -s -X DELETE "$BASE_URL/$TASK_ID")
   echo "   Response: $DELETE_RESPONSE"
   echo ""
 fi
@@ -168,7 +168,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
   
   echo "   Sending 5 concurrent requests..."
   for i in {1..5}; do
-    RESP=$(curl -s -X POST $BASE_URL/generate \
+    RESP=$(curl -s -X POST $BASE_URL/ \
       -H "Content-Type: application/json" \
       -d "{\"user_id\": 1, \"rows\": 10000}")
     
@@ -194,7 +194,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     COMPLETED_COUNT=0
     
     for TID in "${TASK_IDS[@]}"; do
-      STATUS_RESP=$(curl -s "$BASE_URL/status/$TID")
+      STATUS_RESP=$(curl -s "$BASE_URL/$TID/status")
       
       if command -v jq &> /dev/null; then
         ST=$(echo $STATUS_RESP | jq -r '.status')

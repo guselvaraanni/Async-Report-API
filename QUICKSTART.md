@@ -17,7 +17,7 @@ docker-compose ps
 # All should show "running" or "healthy"
 
 # 3. Test
-curl http://localhost:5000/api/reports/health
+curl http://localhost:5000/api/v1/reports/health
 ```
 
 ### Option 2: Manual Setup (5 minutes)
@@ -44,7 +44,7 @@ celery -A worker.celery worker --loglevel=info
 
 ### Step 1: Generate a Report
 ```bash
-TASK_ID=$(curl -s -X POST http://localhost:5000/api/reports/generate \
+TASK_ID=$(curl -s -X POST http://localhost:5000/api/v1/reports/ \
   -H "Content-Type: application/json" \
   -d '{"user_id": 1, "rows": 10000}' | jq -r '.task_id')
 
@@ -53,12 +53,12 @@ echo "Task ID: $TASK_ID"
 
 ### Step 2: Poll Status
 ```bash
-curl http://localhost:5000/api/reports/status/$TASK_ID | jq
+curl http://localhost:5000/api/v1/reports/$TASK_ID/status | jq
 ```
 
 ### Step 3: Download (when complete)
 ```bash
-curl -O http://localhost:5000/api/reports/download/$TASK_ID
+curl -O http://localhost:5000/api/v1/reports/$TASK_ID/download
 ```
 
 ---
@@ -67,21 +67,23 @@ curl -O http://localhost:5000/api/reports/download/$TASK_ID
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| GET | `/health` | Health check |
-| POST | `/generate` | Start async report |
-| GET | `/status/<task_id>` | Check progress |
-| GET | `/download/<task_id>` | Download CSV |
-| GET | `/list?user_id=1` | List all reports |
-| DELETE | `/delete/<task_id>` | Delete report |
+| GET | `/api/v1/reports/health` | Health check |
+| POST | `/api/v1/reports/` | Start async report |
+| GET | `/api/v1/reports/<id>/status` | Check progress |
+| GET | `/api/v1/reports/<id>/download` | Download CSV |
+| GET | `/api/v1/reports/?user_id=1` | List reports |
+| POST | `/api/v1/reports/<id>/cancel` | Cancel report |
+| POST | `/api/v1/reports/<id>/retry` | Retry failed report |
+| DELETE | `/api/v1/reports/<id>` | Delete report |
 
 ---
 
 ## What's Happening?
 
-1. **POST /generate** → Returns `202 Accepted` with `task_id` (instant)
+1. **POST /api/v1/reports/** → Returns `202 Accepted` with `task_id` (instant)
 2. **Celery Worker** → Picks up task, processes data in background
-3. **GET /status** → Shows `PENDING`, then `PROCESSING`, then `COMPLETED`
-4. **GET /download** → Available only when status = `COMPLETED`
+3. **GET /api/v1/reports/<id>/status** → Shows `QUEUED`, then `PROCESSING`, then terminal state
+4. **GET /api/v1/reports/<id>/download** → Available only when status = `COMPLETED`
 
 **Flask API stays responsive the entire time!**
 

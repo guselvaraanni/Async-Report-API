@@ -1,584 +1,517 @@
-# Async Report Export API
+# Export Queue — Async Report Generation Platform
 
-A production-ready, scalable API for exporting massive datasets (1M+ rows) without blocking the main thread. Built with Flask, Celery, Redis, and MySQL.
+A production-style **async CSV export system** built with **Flask**, **Celery**, **Redis/Memurai**, and **MySQL**. The API accepts large export requests without blocking HTTP threads; a background worker streams rows in batches, writes CSV files to disk, and exposes progress through a built-in **Export Queue** web dashboard.
 
-## Why This Architecture?
+Designed for portfolios and interviews: demonstrates app factory pattern, versioned REST APIs, queue-based workers, polling UX, operational monitoring, and Windows-friendly local development (Memurai, no Docker required).
 
-### The Problem
-When users request large exports (1M+ transactions), processing them in the main Flask thread causes:
-- **HTTP 504 Gateway Timeout** (browser gives up)
-- **Server Freeze** (Flask can't handle other requests)
-- **Memory Crash** (loading 1M rows into RAM)
+---
 
-### The Solution
-This API uses **asynchronous task processing**:
+## Table of Contents
 
-1. User requests report → API instantly returns `202 Accepted` with `task_id`
-2. Celery Worker (separate process) picks up task from Redis queue
-3. Worker connects to MySQL, processes data, saves CSV file
-4. User polls `/status/<task_id>` until completion
-5. Download link appears when ready
+- [Why This Project Exists](#why-this-project-exists)
+- [Key Features](#key-features)
+- [Screenshots](#screenshots)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Installation & Setup](#installation--setup)
+- [Data Seeding](#data-seeding)
+- [Web Dashboard](#web-dashboard)
+- [API Reference](#api-reference)
+- [Report Lifecycle](#report-lifecycle)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Related Documentation](#related-documentation)
 
-**Result:** Flask stays responsive, workers handle heavy lifting in parallel.
+---
 
-## Tech Stack
+## Why This Project Exists
 
-- **API Framework:** Flask 3.0
-- **Database:** MySQL 8.0
-- **Message Broker:** Redis 7
-- **Task Queue:** Celery 5.3
-- **ORM:** Flask-SQLAlchemy
-- **Containerization:** Docker & Docker Compose
+Exporting hundreds of thousands of database rows inside a single HTTP request causes:
+
+- **504 Gateway Timeout** — clients give up waiting  
+- **Blocked web workers** — Flask cannot serve other traffic  
+- **Memory pressure** — loading entire result sets into RAM  
+
+**Export Queue** solves this by:
+
+1. Returning **`202 Accepted`** immediately with a `report_id`  
+2. Enqueuing work on **Redis/Memurai** (`reports` queue)  
+3. Processing in a **Celery worker** with `yield_per` batching  
+4. Letting clients **poll status** until `COMPLETED`, then **download** the CSV  
+
+---
+
+## Key Features
+
+### Backend
+
+- **Flask app factory** with environment-based config (`Development`, `Testing`, `Production`)
+- **Canonical REST API** under `/api/v1/reports` and `/api/v1/ops`
+- **Legacy compatibility** shim at `/reports/*` for older clients
+- **Celery** as the only background execution path (`export_transactions_task`)
+- **Cooperative cancel**, retry, delete, and paginated list/filter/search
+- **Flask-Migrate** migrations + legacy schema upgrade path
+- **Structured JSON logging** and consistent API error payloads
+- **19 automated tests** (pytest, in-memory SQLite + Celery eager mode)
+
+### Frontend (built-in dashboard)
+
+- **Export Queue** UI — top navigation, dark/light theme, engineering-focused layout
+- Pages: **Overview**, **Jobs**, **Enqueue**, **Files**, **Infrastructure**
+- **PollingManager** — backoff, retry limits, tab visibility pause, offline banner
+- **Blob-based downloads** with toast errors (no broken `download.htm` files)
+- **Partial export warnings** when DB has fewer rows than requested
+- Live job tracker with lifecycle stepper and progress bar
+
+### Operations
+
+- Worker/queue metrics, failed job list, dry-run cleanup
+- Celery inspect integration (workers, queues, depth estimate)
+- Windows + **Memurai** documented (`--pool=solo` for Celery)
+
+---
+
+## Screenshots
+
+Screenshots live in [`screenshots/`](screenshots/). They are grouped by feature (not by filename order).
+
+### Overview — live pipeline & worker health
+
+Dashboard home: job totals, worker status, status distribution, and recent jobs. Polls `/api/v1/reports/stats` and `/api/v1/ops/metrics` on an interval.
+
+![Overview dashboard](screenshots/Screenshot%202026-05-29%20073536.png)
+
+---
+
+### Enqueue — submit a new export
+
+Create a job with **User ID** and **row limit**. The right panel **Live tracker** polls status via `JobPoller` until the job reaches a terminal state.
+
+**Successful small export** (user 1, 50 rows — matches seeded data):
+
+![Enqueue — completed 50/50 rows](screenshots/Screenshot%202026-05-29%20072902.png)
+
+**Large export in progress** (user 2, 50k requested — streams from MySQL):
+
+![Enqueue — processing 6%](screenshots/Screenshot%202026-05-29%20073127.png)
+
+![Enqueue — processing 13%](screenshots/Screenshot%202026-05-29%20073134.png)
+
+**Partial completion** — all available rows exported; toast explains when DB has fewer rows than requested:
+
+![Enqueue — partial export toast](screenshots/Screenshot%202026-05-29%20073151.png)
+
+---
+
+### Jobs — history, filter, actions
+
+Paginated table with status badges, progress, cancel/retry/delete, and download (`DL`) when the CSV exists on disk. Legacy jobs may show **File unavailable**.
+
+![Jobs table](screenshots/Screenshot%202026-05-29%20073602.png)
+
+---
+
+### Report detail — single job lifecycle
+
+Full metadata, Celery state, lifecycle stepper, download/delete/retry/cancel actions.
+
+**Completed with partial-export warning** (10,000 of 50,000 requested for user 2):
+
+![Report detail — partial export](screenshots/Screenshot%202026-05-29%20073333.png)
+
+**Failed job** — typical Windows Celery prefork error; UI suggests `--pool=solo`:
+
+![Report detail — Celery FAILURE](screenshots/Screenshot%202026-05-29%20072543.png)
+
+---
+
+### Files — download center
+
+Table of `COMPLETED` exports: **READY** (CSV on disk) vs **MISSING** (legacy rows or deleted files). Uses `ReportAPI.downloadReport()` (fetch → blob).
+
+![Files — READY and MISSING](screenshots/Screenshot%202026-05-29%20073628.png)
+
+---
+
+### Infrastructure — workers, queues, failed jobs
+
+Celery worker nodes, queue topology JSON, failed job table with retry, maintenance dry-run cleanup.
+
+![Infrastructure — healthy worker](screenshots/Screenshot%202026-05-29%20073644.png)
+
+![Infrastructure — failed jobs list](screenshots/Screenshot%202026-05-29%20072603.png)
+
+---
+
+### Generated CSV output
+
+Example export opened in Excel — columns: `id`, `user_id`, `amount`, `currency`, `status`, `created_at`.
+
+**~10,000 rows** (user 2 partial/large export):
+
+![CSV export ~10k rows](screenshots/Screenshot%202026-05-29%20073509.png)
+
+**50 rows** (user 1 seed data):
+
+![CSV export 50 rows](screenshots/Screenshot%202026-05-29%20072229.png)
+
+---
 
 ## Architecture
 
 ```
-async-report-api/
-├── app/
-│   ├── __init__.py          # Flask app factory, Celery init
-│   ├── config.py            # Configuration (MySQL, Redis URIs)
-│   ├── extensions.py        # SQLAlchemy instance
-│   ├── models/
-│   │   ├── user.py          # User model
-│   │   ├── report.py        # Report tracking model
-│   │   └── transaction.py   # Sample transaction data
-│   ├── routes/
-│   │   └── reports.py       # API endpoints
-│   └── tasks/
-│       └── export_tasks.py  # Celery task definitions
-├── worker.py                # Celery worker entry point
-├── run.py                   # Flask server entry point
-├── docker-compose.yml       # Multi-container orchestration
-├── Dockerfile               # Container image definition
-└── requirements.txt         # Python dependencies
+┌─────────────┐     POST /api/v1/reports/      ┌──────────────┐
+│   Browser   │ ───────────────────────────► │  Flask API   │
+│  (Dashboard)│ ◄── poll stats/status/metrics │  (producer)  │
+└─────────────┘                               └──────┬───────┘
+                                                     │
+                     ┌───────────────────────────────┼───────────────────────────────┐
+                     │                               │                               │
+                     ▼                               ▼                               ▼
+              ┌─────────────┐                 ┌─────────────┐                 ┌─────────────┐
+              │   MySQL     │                 │   Memurai   │                 │  ./reports/ │
+              │ report rows │                 │   (Redis)   │                 │  CSV files  │
+              │ + progress  │                 │ queue:reports│                 └─────────────┘
+              └─────────────┘                 └──────┬──────┘
+                                                     │
+                                                     ▼
+                                              ┌─────────────┐
+                                              │   Celery    │
+                                              │   worker    │
+                                              │ (consumer)  │
+                                              └─────────────┘
 ```
+
+| Component | Role |
+|-----------|------|
+| **Flask** | HTTP API + Jinja templates + static dashboard |
+| **MySQL** | Users, transactions, report job state |
+| **Memurai/Redis** | Celery broker & result backend |
+| **Celery worker** | Runs `export_transactions_task` — streams rows, writes CSV |
+| **REPORTS_FOLDER** | On-disk CSV storage (`report_<uuid>.csv`) |
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| API | Flask 3.0, Flask-SQLAlchemy, Flask-Migrate, Flask-Limiter |
+| Task queue | Celery 5.3 |
+| Broker | Redis 7 or **Memurai** (Windows) |
+| Database | MySQL 8 (SQLite in tests) |
+| Frontend | Jinja2 templates, vanilla JS, custom CSS |
+| API docs | Flasgger (OpenAPI) |
+| Testing | pytest, pytest-flask |
+| Optional | Docker Compose |
+
+---
+
+## Project Structure
+
+```
+Async-Report-API/
+├── app/
+│   ├── __init__.py              # App factory, Celery init, blueprints
+│   ├── config.py                # Dev / Test / Prod configuration
+│   ├── celery_app.py            # Celery + Flask app context tasks
+│   ├── extensions.py            # db, migrate, limiter
+│   ├── api/v1/
+│   │   ├── reports.py           # Report lifecycle API
+│   │   ├── ops.py               # Metrics, workers, failed jobs, cleanup
+│   │   └── helpers.py           # Pagination, JSON errors
+│   ├── models/                  # User, Transaction, Report
+│   ├── tasks/export_tasks.py    # Celery export task
+│   ├── routes/legacy_reports.py # /reports/* compatibility
+│   ├── web/routes.py            # Dashboard page routes
+│   ├── templates/               # Jinja HTML
+│   └── static/                  # CSS, JS (api, polling, ui, pages)
+├── worker.py                    # Celery worker entry (Windows-safe defaults)
+├── run.py                       # Flask entrypoint
+├── scripts/start_worker.ps1     # Windows worker helper
+├── migrations/                  # Alembic migrations
+├── tests/                       # pytest suite
+├── seeds_db.py                  # 50 transactions for user 1
+├── seed_50k.py                  # 50,000 transactions for user 2
+├── screenshots/                 # UI screenshots for README
+├── PROJECT_ANALYSIS.md          # Deep engineering analysis
+├── TESTING_GUIDE.md             # Manual test checklist
+├── QUICKSTART.md                # Short quick start
+└── requirements.txt
+```
+
+---
+
+## Prerequisites
+
+- **Python 3.8+** (3.10+ recommended)
+- **MySQL 8** (local instance, e.g. `heavy_data_db`)
+- **Memurai** or Redis on `localhost:6379`
+- **No Docker required** for local development on Windows
+
+---
 
 ## Installation & Setup
 
-### Prerequisites
-- Docker & Docker Compose
-- Or: Python 3.10+, MySQL 8.0, Redis 7
+### 1. Clone and install dependencies
 
-### Quick Start (Docker Recommended)
-
-1. **Clone and navigate:**
-   ```bash
-   cd async-report-api
-   ```
-
-2. **Start all services:**
-   ```bash
-   docker-compose up -d
-   ```
-
-   This spins up:
-   - MySQL database (port 3306)
-   - Redis cache (port 6379)
-   - Flask API (port 5000)
-   - Celery worker (background)
-
-3. **Wait for services to be healthy:**
-   ```bash
-   docker-compose ps
-   # All should show "healthy" or "running"
-   ```
-
-4. **Test the API:**
-   ```bash
-   curl http://localhost:5000/api/reports/health
-   # Response: {"status": "healthy"}
-   ```
-
-### Manual Setup (Without Docker)
-
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Set environment variables:**
-   ```bash
-   export DATABASE_URL="mysql+pymysql://root:password@localhost:3306/async_reports"
-   export CELERY_BROKER_URL="redis://localhost:6379/0"
-   export CELERY_RESULT_BACKEND="redis://localhost:6379/0"
-   export FLASK_ENV="development"
-   ```
-
-3. **Create MySQL database:**
-   ```sql
-   CREATE DATABASE async_reports;
-   ```
-
-4. **Run Flask app:**
-   ```bash
-   python run.py
-   ```
-
-5. **In another terminal, start Celery worker:**
-   ```bash
-   celery -A worker.celery worker --loglevel=info
-   ```
-
-## API Endpoints
-
-### 1. Health Check
+```powershell
+cd Async-Report-API
+pip install -r requirements.txt
 ```
-GET /api/reports/health
+
+### 2. Environment variables
+
+Create a `.env` file (or export variables):
+
+```env
+FLASK_ENV=development
+DATABASE_URL=mysql+pymysql://root:YOUR_PASSWORD@localhost:3306/heavy_data_db
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+REPORTS_FOLDER=./reports
 ```
-**Response:** `{"status": "healthy"}`
+
+### 3. Database migrations
+
+```powershell
+$env:FLASK_ENV = "development"
+flask --app run.py db upgrade
+```
+
+If you have an **old database** from before migrations, see `notes.txt` for the legacy stamp + upgrade path.
+
+### 4. Start Memurai
+
+Ensure the Memurai (Redis-compatible) service is running on port **6379**.
+
+### 5. Start Celery worker
+
+**Windows — required flags** (`--pool=solo`):
+
+```powershell
+.\scripts\start_worker.ps1
+```
+
+Or:
+
+```powershell
+celery -A worker.celery worker --loglevel=info -Q reports --pool=solo --concurrency=1
+```
+
+Or:
+
+```powershell
+python worker.py
+```
+
+**Linux/macOS:**
+
+```bash
+celery -A worker.celery worker --loglevel=info -Q reports --concurrency=4
+```
+
+### 6. Start Flask
+
+```powershell
+python run.py
+```
+
+### 7. Open the dashboard
+
+[http://localhost:5000/](http://localhost:5000/)
 
 ---
 
-### 2. Generate Report (Start Export)
-```
-POST /api/reports/generate
-Content-Type: application/json
+## Data Seeding
 
-{
-    "user_id": 1,
-    "rows": 50000
-}
-```
+| Script | What it does |
+|--------|----------------|
+| `python seeds_db.py` | Creates **user 1** with **~50 transactions** |
+| `python seed_50k.py` | Adds **50,000 transactions** for **user 2** |
 
-**Response (202 Accepted):**
-```json
-{
-    "task_id": "a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6",
-    "status": "PENDING",
-    "message": "Report generation started. Poll /status/<task_id> to check progress."
-}
+**Important:** Requesting `50,000` rows for **user 1** only exports ~50 rows (all that exist). The job still **completes** — the UI shows a **partial export** warning. For a full 50k demo:
+
+```powershell
+python seed_50k.py
+# Then enqueue with user_id=2, rows=50000
 ```
 
-**Usage in cURL:**
+---
+
+## Web Dashboard
+
+| Route | Page | Description |
+|-------|------|-------------|
+| `/` | Overview | Metrics, worker health, recent jobs |
+| `/reports/new` | Enqueue | Submit job + live tracker |
+| `/reports` | Jobs | History, filter, cancel, retry, download |
+| `/reports/<id>` | Report detail | Lifecycle, progress, actions |
+| `/downloads` | Files | Completed exports download center |
+| `/ops` | Infrastructure | Workers, queues, failed jobs, cleanup |
+
+**Top bar** shows queue depth and worker count (polled from `/api/v1/ops/metrics`).
+
+---
+
+## API Reference
+
+Base path: **`/api/v1`**
+
+### Reports (`/api/v1/reports`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | API health |
+| POST | `/` | Create/enqueue export (`user_id`, `rows`) → **202** |
+| GET | `/stats` | Dashboard aggregates + recent jobs |
+| GET | `/?page=&status=&q=&sort=` | Paginated list |
+| GET | `/<report_id>` | Full report |
+| GET | `/<report_id>/status` | Status + progress + Celery state |
+| GET | `/<report_id>/download` | Download CSV (`text/csv`) |
+| POST | `/<report_id>/cancel` | Request cooperative cancel |
+| POST | `/<report_id>/retry` | Re-queue **FAILED** job |
+| DELETE | `/<report_id>` | Delete report + file |
+
+**Create job example:**
+
 ```bash
-curl -X POST http://localhost:5000/api/reports/generate \
+curl -X POST http://localhost:5000/api/v1/reports/ \
   -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "rows": 50000}'
+  -d "{\"user_id\": 2, \"rows\": 1000}"
 ```
+
+**Response (202):**
+
+```json
+{
+  "report_id": "uuid-here",
+  "task_id": "uuid-here",
+  "status": "QUEUED",
+  "created_at": "2026-05-29T01:58:36"
+}
+```
+
+**Poll status:**
+
+```bash
+curl http://localhost:5000/api/v1/reports/<report_id>/status
+```
+
+**Download:**
+
+```bash
+curl -O http://localhost:5000/api/v1/reports/<report_id>/download
+```
+
+### Operations (`/api/v1/ops`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Celery ping / broker visibility |
+| GET | `/metrics` | Workers + report counts by status |
+| GET | `/workers` | Celery inspect stats |
+| GET | `/queues` | Active queue topology |
+| GET | `/failed?page=&page_size=` | Paginated failed reports |
+| POST | `/cleanup?days=7&dry_run=true` | Preview/delete old terminal jobs |
+
+### Legacy (`/reports/*`)
+
+| Legacy | Forwards to |
+|--------|-------------|
+| `POST /reports/generate` | `POST /api/v1/reports/` |
+| `GET /reports/status/<id>` | `GET /api/v1/reports/<id>/status` |
+| `GET /reports/download/<id>` | `GET /api/v1/reports/<id>/download` |
 
 ---
 
-### 3. Check Report Status
+## Report Lifecycle
+
 ```
-GET /api/reports/status/<task_id>
+QUEUED → PROCESSING → COMPLETED
+                   ↘ FAILED
+        CANCEL_REQUESTED → CANCELED
 ```
 
-**Response (while processing):**
-```json
-{
-    "task_id": "a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6",
-    "status": "PROCESSING",
-    "rows_processed": 12500,
-    "created_at": "2024-01-15T10:30:00",
-    "started_at": "2024-01-15T10:30:02",
-    "completed_at": null
-}
-```
+| Status | Meaning |
+|--------|---------|
+| **QUEUED** | Saved in DB; waiting for worker |
+| **PROCESSING** | Worker writing CSV |
+| **COMPLETED** | CSV ready (if file on disk) |
+| **FAILED** | Error in `error_message` |
+| **CANCEL_REQUESTED** | User asked to stop |
+| **CANCELED** | Stopped (cooperative) |
 
-**Response (completed):**
-```json
-{
-    "task_id": "a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6",
-    "status": "COMPLETED",
-    "rows_processed": 50000,
-    "created_at": "2024-01-15T10:30:00",
-    "started_at": "2024-01-15T10:30:02",
-    "completed_at": "2024-01-15T10:35:45",
-    "download_url": "/api/reports/download/a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6",
-    "file_url": "/reports/download/a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6"
-}
-```
+- `report_id` equals Celery `task_id` (UUID).  
+- Progress: `rows_processed`, `progress_pct`, timestamps.  
+- `download_available` in API when CSV exists (`resolve_csv_path()`).  
+- Legacy DB rows may store URL paths in `file_path` — downloads resolve canonical `./reports/report_<id>.csv`.
 
 ---
 
-### 4. Download Report (CSV File)
-```
-GET /api/reports/download/<task_id>
+## Testing
+
+```powershell
+$env:FLASK_ENV = "testing"
+pytest -q
 ```
 
-**Response:** Binary CSV file download
+Tests use **in-memory SQLite** and **Celery eager mode** — they do not touch your development MySQL database.
 
-**Usage in cURL:**
-```bash
-curl -O http://localhost:5000/api/reports/download/a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6
-# Saves as report_a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6.csv
-```
+See **[TESTING_GUIDE.md](TESTING_GUIDE.md)** for a manual checklist.
 
 ---
-
-### 5. List All Reports for User
-```
-GET /api/reports/list?user_id=1
-```
-
-**Response:**
-```json
-{
-    "user_id": 1,
-    "count": 3,
-    "reports": [
-        {
-            "id": 1,
-            "task_id": "a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6",
-            "status": "COMPLETED",
-            "file_url": "/reports/download/a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6",
-            "rows_processed": 50000,
-            "created_at": "2024-01-15T10:30:00",
-            "completed_at": "2024-01-15T10:35:45"
-        }
-    ]
-}
-```
-
----
-
-### 6. Delete Report
-```
-DELETE /api/reports/delete/<task_id>
-```
-
-**Response:**
-```json
-{
-    "message": "Report a1b2c3d4-e5f6-47g8-h9i0-j1k2l3m4n5o6 deleted successfully"
-}
-```
-
----
-
-### 7. Test Celery Connectivity
-```
-GET /api/reports/test-celery
-```
-
-**Response:**
-```json
-{
-    "task_id": "celery-task-id",
-    "message": "Dummy task triggered. Check status in 10 seconds.",
-    "celery_status": "PENDING"
-}
-```
-
-## Testing Workflow
-
-### 1. Create Sample Data
-
-Access MySQL container and insert dummy transactions:
-
-```bash
-docker exec -it async-reports-db mysql -u appuser -p async_reports
-
-# In MySQL shell:
-USE async_reports;
-
--- Insert sample user
-INSERT INTO users (username, email) VALUES ('testuser', 'test@example.com');
-
--- Insert 50,000 dummy transactions
-INSERT INTO transactions (user_id, amount, currency, status)
-SELECT 1, ROUND(RAND() * 1000, 2), 'USD', 'COMPLETED'
-FROM (
-    SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
-) t1, (
-    SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
-) t2, (
-    SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
-) t3, (
-    SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5
-) t4
-LIMIT 50000;
-```
-
-### 2. Trigger Multiple Reports
-
-```bash
-# Request 1
-TASK_ID_1=$(curl -s -X POST http://localhost:5000/api/reports/generate \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "rows": 50000}' | jq -r '.task_id')
-
-# Request 2
-TASK_ID_2=$(curl -s -X POST http://localhost:5000/api/reports/generate \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "rows": 50000}' | jq -r '.task_id')
-
-echo "Task 1: $TASK_ID_1"
-echo "Task 2: $TASK_ID_2"
-```
-
-### 3. Poll Status
-
-```bash
-# Check status (while processing)
-curl http://localhost:5000/api/reports/status/$TASK_ID_1 | jq
-
-# Keep polling until status = COMPLETED
-while true; do
-  STATUS=$(curl -s http://localhost:5000/api/reports/status/$TASK_ID_1 | jq -r '.status')
-  echo "Status: $STATUS"
-  if [ "$STATUS" = "COMPLETED" ]; then
-    break
-  fi
-  sleep 2
-done
-```
-
-### 4. Download Report
-
-```bash
-curl -O http://localhost:5000/api/reports/download/$TASK_ID_1
-
-# View first 10 lines
-head -10 report_*.csv
-```
-
-### 5. Watch Celery Worker Logs
-
-```bash
-docker logs -f async-reports-worker
-
-# You should see:
-# [tasks.export_tasks.export_transactions_task: ...] STARTED
-# [tasks.export_tasks.export_transactions_task: ...] Progress: 10000 rows
-# [tasks.export_tasks.export_transactions_task: ...] SUCCESS
-```
-
-## Key Design Patterns
-
-### 1. Async Request → Task ID Response
-```python
-# User sends request
-POST /api/reports/generate → Returns 202 Accepted with task_id
-
-# API does this:
-report = Report(task_id=str(uuid.uuid4()), status='PENDING')
-db.session.add(report)
-db.session.commit()
-export_transactions_task.delay(task_id, user_id, rows)
-return {'task_id': task_id}, 202
-```
-
-### 2. Celery Task with Flask Context
-```python
-@shared_task(bind=True)
-def export_transactions_task(self, task_id, user_id, limit=1000000):
-    # Task runs in separate process
-    # BUT has access to Flask app context via our ContextTask wrapper
-    report = Report.query.filter_by(task_id=task_id).first()
-    report.status = 'PROCESSING'
-    db.session.commit()
-    
-    # Heavy processing...
-    
-    report.status = 'COMPLETED'
-    db.session.commit()
-```
-
-### 3. Polling for Completion
-```javascript
-// Client-side (JavaScript)
-const taskId = "...";
-let completed = false;
-
-const poll = setInterval(async () => {
-  const response = await fetch(`/api/reports/status/${taskId}`);
-  const data = await response.json();
-  
-  console.log(`Progress: ${data.rows_processed} rows`);
-  
-  if (data.status === 'COMPLETED') {
-    clearInterval(poll);
-    // Download available at: data.download_url
-    completed = true;
-  } else if (data.status === 'FAILED') {
-    clearInterval(poll);
-    console.error(data.error_message);
-  }
-}, 2000); // Poll every 2 seconds
-```
-
-## Performance & Scalability
-
-### Batch Processing
-The task processes data in **10,000-row batches** to avoid loading 1M rows into RAM:
-```python
-batch_size = 10000
-offset = 0
-while offset < limit:
-    transactions = Transaction.query.limit(batch_size).offset(offset).all()
-    # Process and write to CSV
-    offset += batch_size
-```
-
-### Parallel Workers
-By default, 4 Celery workers run in parallel:
-```yaml
-# docker-compose.yml
-command: celery -A worker.celery worker --concurrency=4
-```
-
-To scale:
-```bash
-# Start more workers
-docker-compose up -d --scale worker=10
-```
-
-### Connection Pooling
-Flask-SQLAlchemy uses connection pooling (default 5 connections). Adjust:
-```python
-# app/config.py
-SQLALCHEMY_ENGINE_OPTIONS = {
-    'pool_size': 10,
-    'pool_recycle': 3600,
-    'pool_pre_ping': True,
-}
-```
-
-## Error Handling
-
-### Task Failures
-If Celery task fails, status updates to `FAILED`:
-```python
-except Exception as e:
-    report.status = 'FAILED'
-    report.error_message = str(e)
-    db.session.commit()
-```
-
-Check via API:
-```bash
-curl http://localhost:5000/api/reports/status/$TASK_ID | jq '.error_message'
-```
-
-### Timeout Protection
-Tasks have a 30-minute timeout:
-```python
-# app/config.py
-CELERY_TASK_TIME_LIMIT = 30 * 60
-```
-
-### Graceful Degradation
-- Missing user → HTTP 404
-- Missing report → HTTP 404
-- Not yet complete → HTTP 400 with current status
-- File not on disk → HTTP 404
-
-## Monitoring & Debugging
-
-### View Celery Tasks
-```bash
-# Inside container
-docker exec -it async-reports-worker celery -A worker.celery inspect active
-# Lists all currently running tasks
-
-docker exec -it async-reports-worker celery -A worker.celery inspect stats
-# Worker statistics
-```
-
-### View Database
-```bash
-docker exec -it async-reports-db mysql -u appuser -p async_reports
-
-# Check report status
-SELECT id, task_id, status, rows_processed FROM reports;
-
-# Check transactions
-SELECT COUNT(*) FROM transactions;
-```
-
-### View Redis Queue
-```bash
-docker exec -it async-reports-redis redis-cli
-
-# See pending tasks
-KEYS *
-LLEN celery
-
-# Monitor in real-time
-MONITOR
-```
-
-### Application Logs
-```bash
-# Flask API logs
-docker logs -f async-reports-web
-
-# Celery worker logs
-docker logs -f async-reports-worker
-
-# MySQL logs
-docker logs -f async-reports-db
-```
-
-## Stopping & Cleanup
-
-```bash
-# Stop all services
-docker-compose down
-
-# Stop and remove volumes (clean slate)
-docker-compose down -v
-
-# Rebuild images
-docker-compose build --no-cache
-```
-
-## Production Deployment Checklist
-
-- [ ] Use strong passwords for MySQL/Redis
-- [ ] Set `SECRET_KEY` environment variable
-- [ ] Enable HTTPS/SSL
-- [ ] Use separate Redis instances for broker and result backend
-- [ ] Implement authentication on API endpoints
-- [ ] Add rate limiting to prevent abuse
-- [ ] Use persistent volumes for database and reports
-- [ ] Configure log aggregation (ELK, Datadog, etc.)
-- [ ] Set up monitoring & alerts (Prometheus, Grafana)
-- [ ] Use managed services (AWS RDS, ElastiCache) in production
-- [ ] Implement request validation & sanitization
-- [ ] Add pagination to `/list` endpoint
-- [ ] Use environment-specific configurations
 
 ## Troubleshooting
 
-### Celery Tasks Not Running
-```bash
-# 1. Check if worker is running
-docker-compose ps | grep worker
+### Celery: `not enough values to unpack (expected 3, got 0)`
 
-# 2. Check Redis connectivity
-docker exec -it async-reports-redis redis-cli ping
-# Should return: PONG
+**Cause:** Default **prefork** pool on Windows.  
+**Fix:** Restart worker with `--pool=solo --concurrency=1` (see [Installation](#installation--setup)).
 
-# 3. Restart worker
-docker-compose restart worker
-```
+### Job stuck QUEUED, Celery shows FAILURE
 
-### MySQL Connection Errors
-```bash
-# Verify database exists
-docker exec -it async-reports-db mysql -u appuser -p -e "SHOW DATABASES;"
+- Worker not running or wrong pool  
+- Memurai not running  
+- Open job detail — UI syncs Celery FAILURE → DB FAILED  
 
-# Check connection string
-echo $DATABASE_URL
-```
+### COMPLETED but only 0.1% progress (50 / 50000)
 
-### Reports Directory Permissions
-```bash
-# Ensure directory exists and is writable
-docker exec async-reports-web mkdir -p /tmp/reports
-docker exec async-reports-web chmod 777 /tmp/reports
-```
+**Not a stuck job** — user 1 only has ~50 transactions. Use `seed_50k.py` and **user_id=2**, or request `rows=50` for user 1.
+
+### Download shows "File unavailable" / MISSING
+
+- Old jobs before file storage stored URL paths, not files  
+- CSV deleted from `REPORTS_FOLDER`  
+- Run a **new** export after worker is healthy  
+
+### Dashboard keeps polling after Flask stops
+
+Hard-refresh (`Ctrl+Shift+R`). Polling should pause with **Backend offline** banner (`PollingManager` + `Connectivity`).
+
+### More help
+
+- **[PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md)** — architecture deep dive  
+- **[notes.txt](notes.txt)** — internal engineering notes  
+- **[QUICKSTART.md](QUICKSTART.md)** — minimal quick start  
+- **[PRODUCTION_CONFIG.md](PRODUCTION_CONFIG.md)** — production settings  
+
+---
+
+## Related Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | Full system analysis, API inventory, beginner guide |
+| [TESTING_GUIDE.md](TESTING_GUIDE.md) | Step-by-step verification |
+| [QUICKSTART.md](QUICKSTART.md) | 5-minute API test |
+| [API_EXAMPLES.sh](API_EXAMPLES.sh) | curl examples |
+| [Postman_Collection.json](Postman_Collection.json) | Postman collection |
+
+---
 
 ## License
 
-MIT License - Feel free to use for personal and commercial projects.
-
-## Support
-
-For issues or questions:
-1. Check logs: `docker logs async-reports-*`
-2. Verify all services are running: `docker-compose ps`
-3. Test connectivity to each service
-4. Review the API endpoints documentation above
+MIT License — free for personal and commercial use.
