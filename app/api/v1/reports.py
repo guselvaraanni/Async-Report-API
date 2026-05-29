@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from datetime import datetime
 
@@ -15,12 +17,19 @@ from app.tasks.export_tasks import export_transactions_task
 
 
 reports_v1_bp = Blueprint("reports_v1", __name__)
+logger = logging.getLogger(__name__)
 
 
 def _json_error(code: str, message: str, status: int, *, details=None):
     payload = {"error": {"code": code, "message": message}}
     if details is not None:
         payload["error"]["details"] = details
+    logger.info(
+        "api_error code=%s status=%s detail=%s",
+        code,
+        status,
+        message,
+    )
     return jsonify(payload), status
 
 
@@ -71,11 +80,29 @@ def create_report_job():
     db.session.commit()
 
     # Enqueue the task using the report.task_id as the Celery task_id for 1:1 mapping
-    export_transactions_task.apply_async(
-        args=[task_id, user_id, requested_rows],
-        task_id=task_id,
-        queue="reports",
-    )
+    try:
+        async_result = export_transactions_task.apply_async(
+            args=[task_id, user_id, requested_rows],
+            task_id=task_id,
+            queue="reports",
+        )
+        logger.info(
+            "report_enqueued report_id=%s celery_id=%s queue=reports",
+            task_id,
+            async_result.id,
+        )
+    except Exception as exc:
+        logger.exception("report_enqueue_failed report_id=%s", task_id)
+        report.status = Report.Status.FAILED.value
+        report.error_message = f"Failed to enqueue Celery task: {exc}"
+        report.completed_at = datetime.utcnow()
+        db.session.commit()
+        return _json_error(
+            "QUEUE_UNAVAILABLE",
+            "Could not enqueue job — is Memurai running? Start the Celery worker with pool=solo on Windows.",
+            503,
+            details={"report_id": task_id},
+        )
 
     return jsonify(
         {
@@ -126,19 +153,59 @@ def get_report(report_id: str):
     return jsonify(report.to_dict_v1(current_app.config["API_V1_PREFIX"])), 200
 
 
+def _sync_report_from_celery_state(report: Report, ar: AsyncResult) -> None:
+    """
+    If Celery says FAILURE/REVOKED but DB still shows QUEUED/PROCESSING,
+    update MySQL so the UI matches reality (worker crash, Windows pool bug, etc.).
+    """
+    celery_state = ar.state
+    if celery_state == "FAILURE" and report.status in (
+        Report.Status.QUEUED.value,
+        Report.Status.PROCESSING.value,
+    ):
+        err = ar.result
+        if report.status != Report.Status.FAILED.value:
+            report.status = Report.Status.FAILED.value
+            report.error_message = str(err) if err else "Celery task failed"
+            report.completed_at = datetime.utcnow()
+            db.session.commit()
+            logger.warning(
+                "report_status_synced_from_celery report_id=%s celery=FAILURE",
+                report.task_id,
+            )
+    elif celery_state == "REVOKED" and report.status in (
+        Report.Status.QUEUED.value,
+        Report.Status.PROCESSING.value,
+        Report.Status.CANCEL_REQUESTED.value,
+    ):
+        report.status = Report.Status.CANCELED.value
+        report.completed_at = datetime.utcnow()
+        db.session.commit()
+
+
 @reports_v1_bp.get("/<report_id>/status")
 def get_report_status(report_id: str):
     report = Report.query.filter_by(task_id=report_id).first()
     if not report:
         return _json_error("REPORT_NOT_FOUND", f"Report {report_id} not found", 404)
 
-    payload = report.to_status_v1(current_app.config["API_V1_PREFIX"])
-
     # Enrich with Celery status if broker/backend is available
     try:
         ar = AsyncResult(report_id, app=celery)
-        payload["celery"] = {"state": ar.state}
+        _sync_report_from_celery_state(report, ar)
+        db.session.refresh(report)
     except Exception:
+        ar = None
+
+    payload = report.to_status_v1(current_app.config["API_V1_PREFIX"])
+    if ar:
+        try:
+            payload["celery"] = {"state": ar.state}
+            if ar.state == "FAILURE" and ar.result:
+                payload["celery"]["error"] = str(ar.result)[:500]
+        except Exception:
+            payload["celery"] = {"state": "UNKNOWN"}
+    else:
         payload["celery"] = {"state": "UNKNOWN"}
 
     return jsonify(payload), 200
@@ -146,6 +213,12 @@ def get_report_status(report_id: str):
 
 @reports_v1_bp.get("/<report_id>/download")
 def download_report(report_id: str):
+    """
+    Stream the generated CSV file.
+
+    Legacy reports may have a URL stored in file_path; we resolve the real
+    filesystem path via Report.resolve_csv_path().
+    """
     report = Report.query.filter_by(task_id=report_id).first()
     if not report:
         return _json_error("REPORT_NOT_FOUND", f"Report {report_id} not found", 404)
@@ -157,14 +230,39 @@ def download_report(report_id: str):
             400,
         )
 
-    if not report.file_path:
-        return _json_error("FILE_NOT_FOUND", "Report file path is missing", 404)
+    csv_path = report.resolve_csv_path()
+    if not csv_path:
+        logger.warning(
+            "download_missing_file",
+            extra={
+                "report_id": report_id,
+                "stored_path": report.file_path,
+                "expected": report.build_file_path(),
+            },
+        )
+        return _json_error(
+            "FILE_NOT_FOUND",
+            "CSV file is not on disk. The export may have been created before file "
+            "storage was enabled, or the file was removed. Create a new export to "
+            "generate a fresh download.",
+            404,
+            details={
+                "expected_path": report.build_file_path(),
+                "legacy_path": report.file_path,
+            },
+        )
+
+    # Backfill DB when we recovered from canonical path (fixes legacy URL rows)
+    if report.file_path != csv_path:
+        report.file_path = csv_path
+        db.session.commit()
 
     return send_file(
-        report.file_path,
+        csv_path,
         mimetype="text/csv",
         as_attachment=True,
         download_name=f"report_{report_id}.csv",
+        conditional=True,
     )
 
 
