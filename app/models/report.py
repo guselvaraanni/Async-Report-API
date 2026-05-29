@@ -48,7 +48,42 @@ class Report(db.Model):
         return os.environ.get("REPORTS_FOLDER") or os.path.join(os.getcwd(), "reports")
 
     def build_file_path(self) -> str:
+        """Canonical on-disk CSV path for this report (used by Celery worker)."""
         return os.path.join(self.reports_folder(), f"report_{self.task_id}.csv")
+
+    @staticmethod
+    def _is_legacy_url_path(path: str) -> bool:
+        """Older rows stored API URLs in file_path/file_url instead of filesystem paths."""
+        if not path:
+            return False
+        p = path.strip().replace("\\", "/")
+        return (
+            p.startswith("http://")
+            or p.startswith("https://")
+            or p.startswith("/reports/download/")
+            or p.startswith("/api/")
+        )
+
+    def resolve_csv_path(self) -> Optional[str]:
+        """
+        Return absolute path to CSV if the file exists on disk.
+
+        Handles legacy DB values that still point at download URLs.
+        """
+        candidates = []
+        if self.file_path and not self._is_legacy_url_path(self.file_path):
+            candidates.append(self.file_path)
+        candidates.append(self.build_file_path())
+
+        seen = set()
+        for raw in candidates:
+            if not raw or raw in seen:
+                continue
+            seen.add(raw)
+            abs_path = os.path.abspath(raw)
+            if os.path.isfile(abs_path):
+                return abs_path
+        return None
 
     def export_batch_size(self) -> int:
         try:
@@ -69,8 +104,9 @@ class Report(db.Model):
 
     def delete_files_best_effort(self) -> None:
         try:
-            if self.file_path and os.path.exists(self.file_path):
-                os.remove(self.file_path)
+            path = self.resolve_csv_path()
+            if path and os.path.exists(path):
+                os.remove(path)
         except Exception:
             return
 
@@ -86,6 +122,12 @@ class Report(db.Model):
             "progress_pct": round(self.compute_progress_pct(), 2),
             "error_message": self.error_message,
             "file_path": self.file_path,
+            "download_available": self.resolve_csv_path() is not None,
+            "partial_export": (
+                self.status == self.Status.COMPLETED.value
+                and self.requested_rows > 0
+                and (self.rows_processed or 0) < self.requested_rows
+            ),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,

@@ -1,5 +1,8 @@
 import os
+import sys
 from datetime import timedelta
+
+IS_WINDOWS = sys.platform == "win32"
 
 
 class Config:
@@ -37,7 +40,19 @@ class Config:
     CELERY_TASK_SOFT_TIME_LIMIT = 28 * 60  # 28 minutes
     CELERY_TASK_ACKS_LATE = True
     CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-    
+
+    # Windows: prefork pool crashes with billiard "_loc" error — use solo pool
+    CELERY_WORKER_POOL = os.environ.get("CELERY_WORKER_POOL") or (
+        "solo" if IS_WINDOWS else "prefork"
+    )
+    CELERY_WORKER_CONCURRENCY = int(
+        os.environ.get("CELERY_WORKER_CONCURRENCY", "1" if IS_WINDOWS else "4")
+    )
+    # SIGUSR1 soft timeouts are not supported on Windows
+    CELERY_TASK_SOFT_TIME_LIMIT = (
+        None if IS_WINDOWS else 28 * 60
+    )
+
     # Report settings
     REPORTS_FOLDER = os.environ.get('REPORTS_FOLDER') or os.path.join(os.getcwd(), 'reports')
     MAX_ROWS_PER_REPORT = 1000000

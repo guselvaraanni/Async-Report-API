@@ -15,6 +15,8 @@ import os
 import time
 from datetime import datetime
 
+import logging
+
 from celery import shared_task
 from sqlalchemy.exc import OperationalError
 
@@ -22,9 +24,12 @@ from app.extensions import db
 from app.models.report import Report
 from app.models.transaction import Transaction
 
+logger = logging.getLogger(__name__)
+
 
 @shared_task(
     bind=True,
+    name="app.tasks.export_tasks.export_transactions_task",
     autoretry_for=(OperationalError,),
     retry_backoff=True,
     retry_jitter=True,
@@ -36,8 +41,16 @@ def export_transactions_task(self, report_id: str, user_id: int, requested_rows:
 
     This runs in a Celery worker process and updates the Report row for progress tracking.
     """
+    logger.info(
+        "export_task_start report_id=%s user_id=%s rows=%s",
+        report_id,
+        user_id,
+        requested_rows,
+    )
+
     report = Report.query.filter_by(task_id=report_id).first()
     if not report:
+        logger.error("export_task_report_missing report_id=%s", report_id)
         return
 
     try:
@@ -109,12 +122,33 @@ def export_transactions_task(self, report_id: str, user_id: int, requested_rows:
                     last_commit = now
 
         report.rows_processed = processed
+        # 100% = finished exporting all rows that exist (may be less than requested)
         report.progress_pct = 100.0
         report.status = Report.Status.COMPLETED.value
         report.completed_at = datetime.utcnow()
+        if processed < requested_rows:
+            report.error_message = (
+                f"Exported all {processed} available transaction(s) for user_id={user_id}. "
+                f"Requested {requested_rows:,} — add more data or use a user with a larger dataset "
+                f"(e.g. run seed_50k.py and enqueue with user_id=2)."
+            )
+            logger.warning(
+                "export_task_partial report_id=%s exported=%s requested=%s user_id=%s",
+                report_id,
+                processed,
+                requested_rows,
+                user_id,
+            )
         db.session.commit()
+        logger.info(
+            "export_task_complete report_id=%s rows=%s path=%s",
+            report_id,
+            processed,
+            file_path,
+        )
 
     except Exception as e:
+        logger.exception("export_task_error report_id=%s", report_id)
         # If user requested cancellation, don't overwrite it with FAILED
         db.session.rollback()
         report = Report.query.filter_by(task_id=report_id).first()

@@ -25,12 +25,19 @@ def _select_config_object() -> str:
     return "app.config.DevelopmentConfig"
 
 
-def create_app():
-    """Application factory."""
+def create_app(config_override=None):
+    """
+    Application factory.
+
+    Tests should set FLASK_ENV=testing before calling create_app() so
+    TestingConfig (in-memory SQLite, Celery eager) is used — never the dev MySQL DB.
+    """
     global celery
 
     app = Flask(__name__)
     app.config.from_object(_select_config_object())
+    if config_override:
+        app.config.update(config_override)
 
     # Logging (structured JSON by default)
     _configure_logging(app)
