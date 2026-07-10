@@ -90,9 +90,8 @@ CANCELED gotcha:
 3. DATABASE FLOW
 ----------------------------------------------------------------
 Engine config:
-  - URI: mysql+pymysql://root:selva@localhost:3306/heavy_data_db
-    (config.py default; .env overrides to mysql+mysqlconnector
-     which is NOT installed -> latent bug)
+  - URI: mysql+pymysql://root:YOUR_PASSWORD@localhost:3306/heavy_data_db
+    (set via DATABASE_URL in .env — never commit real credentials)
   - SQLALCHEMY_TRACK_MODIFICATIONS = False (good)
   - No pool tuning. Defaults: pool_size=5, no pool_pre_ping.
 
