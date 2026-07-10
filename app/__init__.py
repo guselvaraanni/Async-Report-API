@@ -73,18 +73,15 @@ def create_app(config_override=None):
     # Celery (single source of truth)
     celery = make_celery(app)
 
-    # Blueprints
-    from app.api.v1.reports import reports_v1_bp
-    from app.api.v1.ops import ops_v1_bp
+    # Blueprints — controllers group related endpoints
+    from app.controllers.reports_controller import reports_v1_bp
+    from app.controllers.ops_controller import ops_v1_bp
+    from app.controllers.legacy_controller import legacy_reports_bp
+    from app.controllers.web_controller import web_bp
+
     app.register_blueprint(reports_v1_bp, url_prefix=f"{app.config['API_V1_PREFIX']}/reports")
     app.register_blueprint(ops_v1_bp, url_prefix=f"{app.config['API_V1_PREFIX']}/ops")
-
-    # Backward compatibility: keep old /reports/* endpoints
-    from app.routes.legacy_reports import legacy_reports_bp
     app.register_blueprint(legacy_reports_bp)
-
-    # Enterprise dashboard UI (Flask templates + static assets)
-    from app.web.routes import web_bp
     app.register_blueprint(web_bp)
 
     return app
