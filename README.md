@@ -184,6 +184,31 @@ Example export opened in Excel — columns: `id`, `user_id`, `amount`, `currency
                                               └─────────────┘
 ```
 
+### Request flow (create export)
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant F as Flask API
+  participant DB as MySQL
+  participant R as Redis
+  participant W as Celery Worker
+
+  C->>F: POST /api/v1/reports/
+  F->>DB: INSERT Report QUEUED
+  F->>R: enqueue export_transactions_task
+  F-->>C: 202 + report_id
+  W->>R: pull job
+  W->>DB: status PROCESSING + progress
+  W->>W: write CSV (yield_per)
+  W->>DB: COMPLETED
+  C->>F: GET .../status (poll)
+  F->>DB: read Report
+  F-->>C: progress / COMPLETED
+  C->>F: GET .../download
+  F-->>C: CSV file
+```
+
 | Component | Role |
 |-----------|------|
 | **Flask** | HTTP API + Jinja templates + static dashboard |
@@ -213,34 +238,33 @@ Example export opened in Excel — columns: `id`, `user_id`, `amount`, `currency
 
 ```
 Async-Report-API/
+├── run.py                       # Flask entrypoint (main HTTP process)
+├── worker.py                    # Celery worker entry
+├── .env.example                 # Copy to .env — no secrets in code
 ├── app/
 │   ├── __init__.py              # App factory, Celery init, blueprints
 │   ├── config.py                # Dev / Test / Prod configuration
 │   ├── celery_app.py            # Celery + Flask app context tasks
 │   ├── extensions.py            # db, migrate, limiter
-│   ├── api/v1/
-│   │   ├── reports.py           # Report lifecycle API
-│   │   ├── ops.py               # Metrics, workers, failed jobs, cleanup
-│   │   └── helpers.py           # Pagination, JSON errors
+│   ├── controllers/             # Blueprints (HTTP layer only)
+│   │   ├── reports_controller.py
+│   │   ├── ops_controller.py
+│   │   ├── legacy_controller.py
+│   │   └── web_controller.py
+│   ├── services/                # Business logic + Celery orchestration
+│   │   ├── report_service.py
+│   │   ├── ops_service.py
+│   │   └── export_service.py
+│   ├── utils/                   # Validation and JSON error helpers
 │   ├── models/                  # User, Transaction, Report
-│   ├── tasks/export_tasks.py    # Celery export task
-│   ├── routes/legacy_reports.py # /reports/* compatibility
-│   ├── web/routes.py            # Dashboard page routes
-│   ├── templates/               # Jinja HTML
-│   └── static/                  # CSS, JS (api, polling, ui, pages)
-├── worker.py                    # Celery worker entry (Windows-safe defaults)
-├── run.py                       # Flask entrypoint
-├── scripts/start_worker.ps1     # Windows worker helper
+│   ├── tasks/export_tasks.py    # Thin Celery task wrapper
+│   ├── templates/ + static/     # Dashboard UI
 ├── migrations/                  # Alembic migrations
 ├── tests/                       # pytest suite
-├── seeds_db.py                  # 50 transactions for user 1
-├── seed_50k.py                  # 50,000 transactions for user 2
-├── screenshots/                 # UI screenshots for README
-├── PROJECT_ANALYSIS.md          # Deep engineering analysis
-├── TESTING_GUIDE.md             # Manual test checklist
-├── QUICKSTART.md                # Short quick start
 └── requirements.txt
 ```
+
+**Layer flow:** `controllers` → `services` → `models` / Celery. Validation lives in `utils/`.
 
 ---
 
@@ -264,7 +288,11 @@ pip install -r requirements.txt
 
 ### 2. Environment variables
 
-Create a `.env` file (or export variables):
+Copy `.env.example` to `.env` and set your values (database password stays in `.env`, not in code):
+
+```powershell
+copy .env.example .env
+```
 
 ```env
 FLASK_ENV=development
@@ -453,12 +481,32 @@ QUEUED → PROCESSING → COMPLETED
 
 ## Testing
 
+This project uses **pytest**. Tests never touch your dev MySQL — they use in-memory SQLite and Celery eager mode.
+
+### How to run
+
 ```powershell
 $env:FLASK_ENV = "testing"
 pytest -q
 ```
 
-Tests use **in-memory SQLite** and **Celery eager mode** — they do not touch your development MySQL database.
+Or verbose with file names:
+
+```powershell
+pytest -v
+```
+
+### What is tested (`tests/`)
+
+| File | What it covers |
+|------|----------------|
+| `test_reports_v1.py` | Create job (202), full lifecycle + download, cancel, retry, pagination, validation errors, 404 |
+| `test_download.py` | CSV download, legacy path resolution, missing file error |
+| `test_legacy_compat.py` | Old `/reports/generate` and `/reports/status` still work |
+| `test_web_ui.py` | Dashboard pages load, static CSS, stats/ops APIs, failed jobs pagination |
+| `test_celery_windows.py` | Windows defaults to `solo` pool and concurrency 1 |
+
+**19 automated tests** total. Manual scripts under `app/tests/` are not part of pytest.
 
 See **[TESTING_GUIDE.md](TESTING_GUIDE.md)** for a manual checklist.
 

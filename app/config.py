@@ -12,9 +12,9 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-prod'
     JSON_SORT_KEYS = False
     
-    # Database
+    # Database — credentials must come from .env
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'mysql+pymysql://root:selva@localhost:3306/heavy_data_db'
+        'sqlite+pysqlite:///instance/local_dev.db'
 
     # Celery
     CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL') or 'redis://localhost:6379/0'
