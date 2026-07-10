@@ -2,7 +2,7 @@
 
 A production-style **async CSV export system** built with **Flask**, **Celery**, **Redis/Memurai**, and **MySQL**. The API accepts large export requests without blocking HTTP threads; a background worker streams rows in batches, writes CSV files to disk, and exposes progress through a built-in **Export Queue** web dashboard.
 
-Designed for portfolios and interviews: demonstrates app factory pattern, versioned REST APIs, queue-based workers, polling UX, operational monitoring, and Windows-friendly local development (Memurai, no Docker required).
+Designed for portfolios and interviews: demonstrates app factory pattern, versioned REST APIs, queue-based workers, polling UX, operational monitoring, and Windows-friendly local development with Memurai.
 
 ---
 
@@ -230,7 +230,6 @@ sequenceDiagram
 | Frontend | Jinja2 templates, vanilla JS, custom CSS |
 | API docs | Flasgger (OpenAPI) |
 | Testing | pytest, pytest-flask |
-| Optional | Docker Compose |
 
 ---
 
@@ -259,8 +258,13 @@ Async-Report-API/
 │   ├── models/                  # User, Transaction, Report
 │   ├── tasks/export_tasks.py    # Thin Celery task wrapper
 │   ├── templates/ + static/     # Dashboard UI
+├── tests/                       # pytest automated tests (only)
+├── scripts/
+│   ├── seeds/                   # DB seed scripts (not part of app)
+│   ├── manual_tests/            # Live-server smoke scripts
+│   ├── start_worker.ps1         # Windows Celery helper
+│   └── API_EXAMPLES.sh          # curl examples
 ├── migrations/                  # Alembic migrations
-├── tests/                       # pytest suite
 └── requirements.txt
 ```
 
@@ -273,7 +277,6 @@ Async-Report-API/
 - **Python 3.8+** (3.10+ recommended)
 - **MySQL 8** (local instance, e.g. `heavy_data_db`)
 - **Memurai** or Redis on `localhost:6379`
-- **No Docker required** for local development on Windows
 
 ---
 
@@ -357,13 +360,13 @@ python run.py
 
 | Script | What it does |
 |--------|----------------|
-| `python seeds_db.py` | Creates **user 1** with **~50 transactions** |
-| `python seed_50k.py` | Adds **50,000 transactions** for **user 2** |
+| `python scripts/seeds/seeds_db.py` | Creates **user 1** with **~50 transactions** |
+| `python scripts/seeds/seed_50k.py` | Creates **user 2** + **50,000 transactions** |
 
 **Important:** Requesting `50,000` rows for **user 1** only exports ~50 rows (all that exist). The job still **completes** — the UI shows a **partial export** warning. For a full 50k demo:
 
 ```powershell
-python seed_50k.py
+python scripts/seeds/seed_50k.py
 # Then enqueue with user_id=2, rows=50000
 ```
 
@@ -506,7 +509,12 @@ pytest -v
 | `test_web_ui.py` | Dashboard pages load, static CSS, stats/ops APIs, failed jobs pagination |
 | `test_celery_windows.py` | Windows defaults to `solo` pool and concurrency 1 |
 
-**19 automated tests** total. Manual scripts under `app/tests/` are not part of pytest.
+**20 automated tests** in `tests/`. Manual live-server scripts live in `scripts/manual_tests/` (not run by pytest).
+
+```powershell
+# Manual smoke test (Flask must be running on :5000)
+python scripts/manual_tests/test_api.py
+```
 
 See **[TESTING_GUIDE.md](TESTING_GUIDE.md)** for a manual checklist.
 
@@ -527,7 +535,7 @@ See **[TESTING_GUIDE.md](TESTING_GUIDE.md)** for a manual checklist.
 
 ### COMPLETED but only 0.1% progress (50 / 50000)
 
-**Not a stuck job** — user 1 only has ~50 transactions. Use `seed_50k.py` and **user_id=2**, or request `rows=50` for user 1.
+**Not a stuck job** — user 1 only has ~50 transactions. Use `scripts/seeds/seed_50k.py` and **user_id=2**, or request `rows=50` for user 1.
 
 ### Download shows "File unavailable" / MISSING
 

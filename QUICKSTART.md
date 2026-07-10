@@ -1,64 +1,56 @@
 # Quick Start Guide
 
-## 5-Minute Setup
+## 5-Minute Setup (Windows / local)
 
 ### Prerequisites
-- Docker & Docker Compose installed
-- OR Python 3.10+, MySQL 8.0, Redis 7
+- Python 3.10+
+- MySQL 8.0
+- Memurai or Redis on `localhost:6379`
 
-### Option 1: Docker (Recommended - 2 minutes)
+### Setup
 
-```bash
-# 1. Start all services
-docker-compose up -d
-
-# 2. Wait for services (30-60 seconds)
-docker-compose ps
-# All should show "running" or "healthy"
-
-# 3. Test
-curl http://localhost:5000/api/v1/reports/health
-```
-
-### Option 2: Manual Setup (5 minutes)
-
-```bash
+```powershell
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Set environment variables
-export DATABASE_URL="mysql+pymysql://user:pass@localhost:3306/async_reports"
-export CELERY_BROKER_URL="redis://localhost:6379/0"
-export CELERY_RESULT_BACKEND="redis://localhost:6379/0"
+# 2. Copy and edit environment variables
+copy .env.example .env
 
-# 3. Terminal 1: Start Flask API
+# 3. Run migrations
+$env:FLASK_ENV = "development"
+flask --app run.py db upgrade
+
+# 4. Seed sample data (optional)
+python scripts/seeds/seeds_db.py
+
+# 5. Terminal 1 — Celery worker (Windows: use solo pool)
+.\scripts\start_worker.ps1
+
+# 6. Terminal 2 — Flask API + dashboard
 python run.py
-
-# 4. Terminal 2: Start Celery Worker
-celery -A worker.celery worker --loglevel=info
 ```
+
+Open [http://localhost:5000/](http://localhost:5000/)
 
 ---
 
 ## Test the API in 30 Seconds
 
 ### Step 1: Generate a Report
-```bash
-TASK_ID=$(curl -s -X POST http://localhost:5000/api/v1/reports/ \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "rows": 10000}' | jq -r '.task_id')
-
-echo "Task ID: $TASK_ID"
+```powershell
+curl -X POST http://localhost:5000/api/v1/reports/ `
+  -H "Content-Type: application/json" `
+  -d "{\"user_id\": 1, \"rows\": 50}"
 ```
 
 ### Step 2: Poll Status
-```bash
-curl http://localhost:5000/api/v1/reports/$TASK_ID/status | jq
+```powershell
+curl http://localhost:5000/api/v1/reports/<report_id>/status
 ```
 
 ### Step 3: Download (when complete)
-```bash
-curl -O http://localhost:5000/api/v1/reports/$TASK_ID/download
+```powershell
+curl -O http://localhost:5000/api/v1/reports/<report_id>/download
 ```
 
 ---
@@ -89,132 +81,42 @@ curl -O http://localhost:5000/api/v1/reports/$TASK_ID/download
 
 ---
 
-## Project Structure
-
-```
-async-report-api/
-├── app/
-│   ├── models/        # User, Report, Transaction models
-│   ├── routes/        # API endpoints
-│   ├── tasks/         # Celery background tasks
-│   └── config.py      # Configuration
-├── worker.py          # Celery entry point
-├── run.py             # Flask entry point
-├── docker-compose.yml # All services in one go
-└── README.md          # Full documentation
-```
-
----
-
 ## Common Commands
 
-### Docker
+```powershell
+# Run automated tests
+$env:FLASK_ENV = "testing"
+pytest -q
 
-```bash
-# Start services
-docker-compose up -d
+# Manual smoke test (Flask must be running)
+python scripts/manual_tests/test_api.py
 
-# View logs
-docker-compose logs -f web        # Flask API
-docker-compose logs -f worker     # Celery worker
-docker-compose logs -f db         # MySQL
-
-# Stop services
-docker-compose down
-
-# Clean everything
-docker-compose down -v
-```
-
-### Testing
-
-```bash
-# Run all examples
-bash API_EXAMPLES.sh
-
-# Seed database with dummy data
-bash seed_db.sh
-```
-
-### Database
-
-```bash
-# Connect to MySQL
-docker exec -it async-reports-db mysql -u appuser -p
-
-# View tables
-USE async_reports;
-SHOW TABLES;
-SELECT * FROM reports;
+# curl examples
+bash scripts/API_EXAMPLES.sh
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Connection refused"
-```bash
-# Wait for services to start
-docker-compose ps
-sleep 10
-```
+### Celery prefork error on Windows
+Use `--pool=solo --concurrency=1` (see `scripts/start_worker.ps1`).
 
-### "No such table: reports"
-```bash
-# Tables are created automatically when Flask starts
-# If not, restart Flask
-docker-compose restart web
-```
+### Job stuck QUEUED
+- Check Memurai/Redis is running on port 6379
+- Check Celery worker is running with `-Q reports`
 
-### "Celery task not running"
-```bash
-# Check worker is running
-docker-compose ps worker
-
-# View worker logs
-docker-compose logs worker
-
-# Restart worker
-docker-compose restart worker
+### Database errors
+```powershell
+flask --app run.py db upgrade
 ```
 
 ---
 
 ## Next Steps
 
-1. **Review** `README.md` for complete documentation
-2. **Explore** API endpoints with cURL or Postman
-3. **Modify** `app/tasks/export_tasks.py` to customize logic
-4. **Scale** by adjusting `concurrency=4` in `docker-compose.yml`
+1. Review `README.md` for full documentation
+2. Explore the dashboard at `http://localhost:5000/`
+3. Run `python scripts/seeds/seed_50k.py` for large export demos
 
----
-
-## Performance Tips
-
-- **Batch Processing**: Task processes 10K rows at a time (no memory overload)
-- **Parallel Workers**: 4 workers by default, scale with `--scale worker=10`
-- **Connection Pooling**: Flask-SQLAlchemy uses pooling by default
-- **Streaming CSV**: Writes to disk in chunks (not all in RAM)
-
----
-
-## Production Checklist
-
-- [ ] Change MySQL/Redis passwords
-- [ ] Set `SECRET_KEY` environment variable
-- [ ] Use persistent volumes for data
-- [ ] Enable HTTPS/SSL
-- [ ] Add authentication to API
-- [ ] Setup monitoring & alerts
-- [ ] Use managed services (AWS RDS, ElastiCache)
-
----
-
-## Need Help?
-
-1. Check `README.md` for detailed docs
-2. Review `API_EXAMPLES.sh` for cURL examples
-3. Check logs: `docker-compose logs`
-4. Test connectivity: `docker-compose ps`
-
-**Happy exporting! 🚀**
+**Happy exporting!**

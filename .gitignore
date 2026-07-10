@@ -45,9 +45,6 @@ env/
 /tmp/reports/
 *.csv
 
-# Docker
-docker-compose.override.yml
-
 # Database
 *.db
 *.sqlite

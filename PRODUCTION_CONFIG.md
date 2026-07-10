@@ -33,110 +33,7 @@ MAX_ROWS_PER_REPORT=5000000
 LOG_LEVEL=INFO
 ```
 
-### 2. Production Docker Compose
-```yaml
-version: '3.8'
-
-services:
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
-    container_name: async-reports-api-prod
-    command: gunicorn --workers 4 --worker-class sync --bind 0.0.0.0:5000 --timeout 120 wsgi:app
-    environment:
-      FLASK_ENV: production
-      DATABASE_URL: mysql+pymysql://user:pass@db:3306/async_reports
-      CELERY_BROKER_URL: redis://redis-broker:6379/0
-      CELERY_RESULT_BACKEND: redis://redis-result:6379/0
-    ports:
-      - "5000:5000"
-    volumes:
-      - reports_volume:/mnt/reports
-    depends_on:
-      - db
-      - redis-broker
-      - redis-result
-    restart: always
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/api/reports/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.prod
-    container_name: async-reports-worker-prod
-    command: celery -A worker.celery worker --loglevel=info --concurrency=8 --max-tasks-per-child=100
-    environment:
-      FLASK_ENV: production
-      DATABASE_URL: mysql+pymysql://user:pass@db:3306/async_reports
-      CELERY_BROKER_URL: redis://redis-broker:6379/0
-      CELERY_RESULT_BACKEND: redis://redis-result:6379/0
-    volumes:
-      - reports_volume:/mnt/reports
-    depends_on:
-      - db
-      - redis-broker
-      - redis-result
-    restart: always
-    deploy:
-      replicas: 3  # Run 3 worker instances
-
-  db:
-    image: mysql:8.0
-    container_name: async-reports-db-prod
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-      MYSQL_DATABASE: async_reports
-      MYSQL_USER: ${DB_USER}
-      MYSQL_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - db_volume:/var/lib/mysql
-    restart: always
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      timeout: 20s
-      retries: 10
-
-  redis-broker:
-    image: redis:7-alpine
-    container_name: async-reports-redis-broker-prod
-    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 2gb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_broker_volume:/data
-    restart: always
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      timeout: 10s
-      retries: 5
-
-  redis-result:
-    image: redis:7-alpine
-    container_name: async-reports-redis-result-prod
-    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 2gb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_result_volume:/data
-    restart: always
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      timeout: 10s
-      retries: 5
-
-volumes:
-  db_volume:
-    driver: local
-  reports_volume:
-    driver: local
-  redis_broker_volume:
-    driver: local
-  redis_result_volume:
-    driver: local
-```
-
-### 3. Gunicorn Production Configuration (wsgi.py)
+### 2. Gunicorn Production Configuration (wsgi.py)
 ```python
 """
 WSGI entry point for production (Gunicorn).
@@ -263,11 +160,8 @@ server {
 ### Horizontal Scaling (Multiple Worker Nodes)
 
 ```bash
-# Scale to 10 worker containers
-docker-compose up -d --scale worker=10
-
-# For Kubernetes
-kubectl scale deployment async-reports-worker --replicas=10
+# Run multiple Celery worker processes on separate machines or terminals
+celery -A worker.celery worker --loglevel=info --concurrency=8
 ```
 
 ### Vertical Scaling (Larger Instances)
@@ -351,8 +245,9 @@ rows_processed = Counter(
 ```json
 {
   "input": {
-    "docker": {
-      "hosts": ["unix:///var/run/docker.sock"]
+    "file": {
+      "path": "/var/log/async-reports/*.log",
+      "start_position": "beginning"
     }
   },
   "filter": {
@@ -429,9 +324,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 mkdir -p $BACKUP_DIR
 
-docker exec async-reports-db mysqldump \
-  -u appuser -p$DB_PASSWORD \
-  async_reports > $BACKUP_DIR/backup_$TIMESTAMP.sql
+mysqldump -u appuser -p async_reports > $BACKUP_DIR/backup_$TIMESTAMP.sql
 
 # Keep last 30 days
 find $BACKUP_DIR -name "backup_*.sql" -mtime +30 -delete
@@ -468,9 +361,9 @@ BATCH_SIZE = 10000  # Adjust if memory constrained
 ### Redis Memory Management
 ```bash
 # Monitor Redis memory
-docker exec async-reports-redis redis-cli INFO memory
+redis-cli INFO memory
 
 # Set max memory with eviction policy
-docker exec async-reports-redis redis-cli CONFIG SET maxmemory 2gb
-docker exec async-reports-redis redis-cli CONFIG SET maxmemory-policy allkeys-lru
+redis-cli CONFIG SET maxmemory 2gb
+redis-cli CONFIG SET maxmemory-policy allkeys-lru
 ```
